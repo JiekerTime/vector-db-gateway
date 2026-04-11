@@ -7,7 +7,7 @@ import logging
 from typing import Any
 
 from vector_gateway.config import CollectionConfig, QdrantConfig
-from vector_gateway.models.api import CollectionInfo, SearchHit, UpsertPoint
+from vector_gateway.models.api import CollectionInfo, ScrollPoint, SearchHit, UpsertPoint
 
 logger = logging.getLogger(__name__)
 
@@ -34,18 +34,7 @@ class QdrantStore:
     async def collection_infos(self) -> list[CollectionInfo]:
         infos: list[CollectionInfo] = []
         for name, meta in self._collections.items():
-            info = CollectionInfo(
-                name=name,
-                vector_size=meta.vector_size,
-                distance=meta.distance,
-                owner=meta.owner,
-                vector_name=meta.vector_name,
-                model=meta.model,
-                query_model=meta.query_model,
-                write_model=meta.write_model,
-                aliases=meta.aliases,
-                description=meta.description,
-            )
+            info = self._collection_info(name, meta)
             try:
                 details = await asyncio.to_thread(self._get_collection, name)
             except Exception as exc:  # pragma: no cover - probe failures
@@ -58,6 +47,54 @@ class QdrantStore:
             infos.append(info)
         return infos
 
+    async def live_collection_infos(self) -> list[CollectionInfo]:
+        infos: list[CollectionInfo] = []
+        collections = await asyncio.to_thread(self._client_get_collections)
+        for item in collections:
+            name = getattr(item, "name", None)
+            if not name:
+                continue
+            try:
+                meta = self._collection_meta(str(name))
+                info = self._collection_info(str(name), meta)
+                details = await asyncio.to_thread(self._get_collection, str(name))
+            except Exception as exc:  # pragma: no cover - probe failures
+                info = CollectionInfo(
+                    name=str(name),
+                    vector_size=0,
+                    distance="unknown",
+                    owner="external",
+                    status=f"error: {exc}",
+                )
+            else:
+                result = self._collection_result(details)
+                info.points_count = _safe_int(result.get("points_count"))
+                info.indexed_vectors_count = _safe_int(result.get("indexed_vectors_count"))
+                info.status = str(result.get("status") or "unknown")
+            infos.append(info)
+        return infos
+
+    async def ensure_collection(
+        self,
+        *,
+        collection: str,
+        meta: CollectionConfig,
+    ) -> tuple[bool, CollectionInfo]:
+        created = False
+        try:
+            details = await asyncio.to_thread(self._get_collection, collection)
+        except Exception:
+            await asyncio.to_thread(self._create_collection, collection, meta)
+            created = True
+            details = await asyncio.to_thread(self._get_collection, collection)
+
+        info = self._collection_info(collection, meta)
+        result = self._collection_result(details)
+        info.points_count = _safe_int(result.get("points_count"))
+        info.indexed_vectors_count = _safe_int(result.get("indexed_vectors_count"))
+        info.status = str(result.get("status") or "unknown")
+        return created, info
+
     async def search(
         self,
         *,
@@ -68,7 +105,7 @@ class QdrantStore:
         with_payload: bool,
         with_vectors: bool,
     ) -> list[SearchHit]:
-        meta = self._collection_meta(collection)
+        meta = await asyncio.to_thread(self._collection_meta, collection)
         query_filter = await asyncio.to_thread(self._build_filter, filter_spec)
         raw_hits = await asyncio.to_thread(
             self._search_sync,
@@ -97,10 +134,37 @@ class QdrantStore:
         return hits
 
     async def count(self, *, collection: str, filter_spec: dict[str, Any] | None) -> int:
-        self._collection_meta(collection)
+        await asyncio.to_thread(self._collection_meta, collection)
         query_filter = await asyncio.to_thread(self._build_filter, filter_spec)
         result = await asyncio.to_thread(self._count_sync, collection, query_filter)
         return int(result.count)
+
+    async def scroll(
+        self,
+        *,
+        collection: str,
+        filter_spec: dict[str, Any] | None,
+        limit: int,
+        with_payload: bool,
+        with_vectors: bool,
+    ) -> list[ScrollPoint]:
+        await asyncio.to_thread(self._collection_meta, collection)
+        query_filter = await asyncio.to_thread(self._build_filter, filter_spec)
+        raw_points = await asyncio.to_thread(
+            self._scroll_sync,
+            collection,
+            query_filter,
+            limit,
+            with_payload,
+            with_vectors,
+        )
+        points: list[ScrollPoint] = []
+        for point in raw_points:
+            point_id = getattr(point, "id", None)
+            payload = getattr(point, "payload", None)
+            item_vector = getattr(point, "vector", None) if with_vectors else None
+            points.append(ScrollPoint(id=str(point_id), payload=payload, vector=item_vector))
+        return points
 
     async def upsert_points(
         self,
@@ -109,9 +173,23 @@ class QdrantStore:
         points: list[UpsertPoint],
         wait: bool = True,
     ) -> int:
-        self._collection_meta(collection)
+        await asyncio.to_thread(self._collection_meta, collection)
         count = await asyncio.to_thread(self._upsert_sync, collection, points, wait)
         return count
+
+    def _collection_info(self, name: str, meta: CollectionConfig) -> CollectionInfo:
+        return CollectionInfo(
+            name=name,
+            vector_size=meta.vector_size,
+            distance=meta.distance,
+            owner=meta.owner,
+            vector_name=meta.vector_name,
+            model=meta.model,
+            query_model=meta.query_model,
+            write_model=meta.write_model,
+            aliases=meta.aliases,
+            description=meta.description,
+        )
 
     def _client_get_collections(self):
         client = self._get_client()
@@ -191,6 +269,24 @@ class QdrantStore:
             count_filter=query_filter,
             exact=True,
         )
+
+    def _scroll_sync(
+        self,
+        collection: str,
+        query_filter,
+        limit: int,
+        with_payload: bool,
+        with_vectors: bool,
+    ):
+        client = self._get_client()
+        points, _ = client.scroll(
+            collection_name=collection,
+            scroll_filter=query_filter,
+            limit=limit,
+            with_payload=with_payload,
+            with_vectors=with_vectors,
+        )
+        return points
 
     def _upsert_sync(self, collection: str, points: list[UpsertPoint], wait: bool) -> int:
         client = self._get_client()
@@ -289,10 +385,21 @@ class QdrantStore:
         return built
 
     def _collection_meta(self, collection: str) -> CollectionConfig:
-        try:
-            return self._collections[collection]
-        except KeyError as exc:
-            raise ValueError(f"Unknown collection: {collection}") from exc
+        meta = self._collections.get(collection)
+        if meta is not None:
+            return meta
+
+        details = self._get_collection(collection)
+        shape = self._extract_vector_shape(details)
+        vector_size = shape.get("vector_size")
+        if vector_size is None:
+            raise ValueError(f"Unable to infer vector size for collection: {collection}")
+        return CollectionConfig(
+            vector_size=vector_size,
+            distance=str(shape.get("distance") or "Cosine"),
+            owner="external",
+            vector_name=shape.get("vector_name"),
+        )
 
     def _point_vector(self, collection: str, vector: list[float]) -> Any:
         meta = self._collection_meta(collection)

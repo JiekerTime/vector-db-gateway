@@ -11,7 +11,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import PlainTextResponse
 
 from vector_gateway.backends import LocalEmbeddingBackend, QdrantStore
-from vector_gateway.config import EmbeddingModelConfig, GatewayConfig, load_config
+from vector_gateway.config import CollectionConfig, EmbeddingModelConfig, GatewayConfig, load_config
 from vector_gateway.core.batching import EmbeddingBatcher
 from vector_gateway.core.metrics import MetricsStore
 from vector_gateway.core.router import Router
@@ -26,7 +26,11 @@ from vector_gateway.models import (
     EmbeddingModelInfo,
     EmbedRequest,
     EmbedResponse,
+    EnsureCollectionRequest,
+    EnsureCollectionResponse,
     QueueSnapshot,
+    ScrollRequest,
+    ScrollResponse,
     SearchRequest,
     SearchResponse,
     StatusResponse,
@@ -77,6 +81,13 @@ async def lifespan(_: FastAPI):
         await _qdrant.ensure_collections()
     except Exception:
         logger.exception("Failed to bootstrap registered collections in Qdrant")
+    try:
+        warmed = await _embed_backend.warmup()
+    except Exception:
+        logger.exception("Failed to warm embedding runtime")
+        raise
+    if warmed:
+        logger.info("Warmed embedding profiles: %s", warmed)
     _embed_batcher = EmbeddingBatcher(
         backend=_embed_backend,
         queue_config=_config.queues,
@@ -150,6 +161,32 @@ async def collections(x_api_key: str = Header(default="")):
     return await _qdrant.collection_infos()
 
 
+@app.get("/collections/live", response_model=list[CollectionInfo])
+async def live_collections(x_api_key: str = Header(default="")):
+    _check_api_key(x_api_key)
+    return await _qdrant.live_collection_infos()
+
+
+@app.post("/collections/ensure", response_model=EnsureCollectionResponse)
+async def ensure_collection(request: EnsureCollectionRequest, x_api_key: str = Header(default="")):
+    _check_api_key(x_api_key)
+    created, info = await _qdrant.ensure_collection(
+        collection=request.collection,
+        meta=CollectionConfig(
+            vector_size=request.vector_size,
+            distance=request.distance,
+            owner=request.owner,
+            vector_name=request.vector_name,
+            model=request.model,
+            query_model=request.query_model,
+            write_model=request.write_model,
+            aliases=request.aliases,
+            description=request.description,
+        ),
+    )
+    return EnsureCollectionResponse(created=created, collection=info)
+
+
 @app.get("/models", response_model=list[EmbeddingModelInfo])
 async def models(x_api_key: str = Header(default="")):
     _check_api_key(x_api_key)
@@ -165,8 +202,11 @@ async def capabilities(x_api_key: str = Header(default="")):
         actions=[
             CapabilityAction(name="embed", endpoint="/embed", description="Generate dense embeddings"),
             CapabilityAction(name="transform_embed", endpoint="/transform/embed", description="Migration-safe embedding callback"),
-            CapabilityAction(name="search", endpoint="/search", description="Search a registered collection"),
-            CapabilityAction(name="count", endpoint="/count", description="Count records in a registered collection"),
+            CapabilityAction(name="search", endpoint="/search", description="Search a collection"),
+            CapabilityAction(name="scroll", endpoint="/scroll", description="Scroll records from a collection"),
+            CapabilityAction(name="live_collections", endpoint="/collections/live", description="List live collections discovered from Qdrant"),
+            CapabilityAction(name="count", endpoint="/count", description="Count records in a collection"),
+            CapabilityAction(name="ensure_collection", endpoint="/collections/ensure", description="Create or validate a collection for vector writes"),
             CapabilityAction(name="upsert_chunks", endpoint="/upsert/chunks", description="Upsert chunks with optional embedding"),
             CapabilityAction(name="upsert_points", endpoint="/upsert/points", description="Upsert points with supplied vectors"),
             CapabilityAction(name="agent_action", endpoint="/agent/action", description="Single action endpoint for machine callers"),
@@ -286,6 +326,39 @@ async def search(request: SearchRequest, x_api_key: str = Header(default="")):
     )
 
 
+@app.post("/scroll", response_model=ScrollResponse)
+async def scroll(request: ScrollRequest, x_api_key: str = Header(default="")):
+    _check_api_key(x_api_key)
+    request_id = _request_id()
+    started = time.monotonic()
+    route = _router.resolve(request.caller, request.operation)
+
+    async def run_scroll():
+        return await _qdrant.scroll(
+            collection=request.collection,
+            filter_spec=request.filter,
+            limit=request.limit,
+            with_payload=request.with_payload,
+            with_vectors=request.with_vectors,
+        )
+
+    points, queue_wait_ms = await _job_scheduler.submit(
+        request_id=request_id,
+        endpoint="scroll",
+        route=route,
+        factory=run_scroll,
+    )
+    latency_ms = int((time.monotonic() - started) * 1000)
+    return ScrollResponse(
+        request_id=request_id,
+        queue=route.queue_name,
+        collection=request.collection,
+        points=points,
+        latency_ms=latency_ms,
+        queue_wait_ms=queue_wait_ms,
+    )
+
+
 @app.post("/count", response_model=CountResponse)
 async def count(request: CountRequest, x_api_key: str = Header(default="")):
     _check_api_key(x_api_key)
@@ -394,8 +467,12 @@ async def agent_action(request: AgentActionRequest, x_api_key: str = Header(defa
         return await transform_embed(TransformEmbedRequest.model_validate(request.payload), x_api_key)
     if request.action == "search":
         return await search(SearchRequest.model_validate(request.payload), x_api_key)
+    if request.action == "scroll":
+        return await scroll(ScrollRequest.model_validate(request.payload), x_api_key)
     if request.action == "count":
         return await count(CountRequest.model_validate(request.payload), x_api_key)
+    if request.action == "ensure_collection":
+        return await ensure_collection(EnsureCollectionRequest.model_validate(request.payload), x_api_key)
     if request.action == "upsert_chunks":
         return await upsert_chunks(UpsertChunksRequest.model_validate(request.payload), x_api_key)
     if request.action == "upsert_points":

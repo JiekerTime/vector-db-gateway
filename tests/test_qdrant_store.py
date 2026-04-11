@@ -114,6 +114,43 @@ class QdrantStoreBootstrapTest(unittest.TestCase):
 
         self.assertEqual(client.create_calls, [])
 
+    def test_unregistered_collection_shape_is_inferred_from_qdrant(self) -> None:
+        client = _FakeClient()
+        client.collections["knowledge_base_v2"] = {
+            "size": 1024,
+            "distance": "Cosine",
+        }
+        store = _FakeQdrantStore(client, {})
+
+        meta = store._collection_meta("knowledge_base_v2")
+
+        self.assertEqual(meta.vector_size, 1024)
+        self.assertEqual(meta.distance, "cosine")
+        self.assertEqual(meta.owner, "external")
+        self.assertIsNone(meta.vector_name)
+
+    def test_ensure_collection_creates_external_collection(self) -> None:
+        client = _FakeClient()
+        store = _FakeQdrantStore(client, {})
+
+        created, info = asyncio.run(
+            store.ensure_collection(
+                collection="knowledge_base_v2",
+                meta=CollectionConfig(
+                    vector_size=1024,
+                    distance="Cosine",
+                    owner="external",
+                    description="Shared knowledge collection",
+                ),
+            )
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(info.name, "knowledge_base_v2")
+        self.assertEqual(info.vector_size, 1024)
+        self.assertEqual(info.owner, "external")
+        self.assertIn("knowledge_base_v2", client.collections)
+
 
 if __name__ == "__main__":
     unittest.main()

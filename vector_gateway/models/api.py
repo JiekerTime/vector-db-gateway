@@ -94,6 +94,31 @@ class SearchResponse(BaseModel):
     queue_wait_ms: int
 
 
+class ScrollRequest(BaseModel):
+    caller: str = "interactive/default"
+    operation: str = "scroll"
+    collection: str
+    filter: dict[str, Any] | None = None
+    limit: int = 100
+    with_payload: bool = True
+    with_vectors: bool = False
+
+
+class ScrollPoint(BaseModel):
+    id: str
+    payload: dict[str, Any] | None = None
+    vector: list[float] | dict[str, Any] | None = None
+
+
+class ScrollResponse(BaseModel):
+    request_id: str
+    queue: str
+    collection: str
+    points: list[ScrollPoint]
+    latency_ms: int
+    queue_wait_ms: int
+
+
 class CountRequest(BaseModel):
     caller: str = "interactive/default"
     operation: str = "count"
@@ -170,6 +195,24 @@ class CollectionInfo(BaseModel):
     points_count: int | None = None
     indexed_vectors_count: int | None = None
     status: str | None = None
+
+
+class EnsureCollectionRequest(BaseModel):
+    collection: str
+    vector_size: int
+    distance: str = "Cosine"
+    vector_name: str | None = None
+    owner: str = "external"
+    model: str | None = None
+    query_model: str | None = None
+    write_model: str | None = None
+    aliases: list[str] = Field(default_factory=list)
+    description: str | None = None
+
+
+class EnsureCollectionResponse(BaseModel):
+    created: bool
+    collection: CollectionInfo
 
 
 class EmbeddingModelInfo(BaseModel):

@@ -9,6 +9,10 @@ embedding:
   device: "auto"
   normalize_embeddings: true
   batch_size: 64
+  warmup_enabled: true
+  warmup_models: ["default"]
+  warmup_devices: ["auto"]
+  warmup_probe_texts: ["warmup"]
 
 models:
   default:

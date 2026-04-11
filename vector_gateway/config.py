@@ -15,6 +15,10 @@ class EmbeddingConfig(BaseModel):
     device: str = "auto"
     normalize_embeddings: bool = True
     batch_size: int = 64
+    warmup_enabled: bool = True
+    warmup_models: list[str] = Field(default_factory=lambda: ["default"])
+    warmup_devices: list[str] = Field(default_factory=lambda: ["auto"])
+    warmup_probe_texts: list[str] = Field(default_factory=lambda: ["warmup"])
 
 
 class EmbeddingModelConfig(BaseModel):

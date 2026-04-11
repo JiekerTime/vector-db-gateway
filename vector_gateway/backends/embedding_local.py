@@ -45,7 +45,45 @@ class LocalEmbeddingBackend:
                 name: self._model_devices.get(name, "unknown")
                 for name in sorted(self._models.keys())
             },
+            "warmup": {
+                "enabled": self._config.warmup_enabled,
+                "models": self._config.warmup_models or sorted(self._model_registry.keys()),
+                "devices": self._config.warmup_devices,
+            },
         }
+
+    async def warmup(self) -> list[dict[str, str]]:
+        if not self._config.warmup_enabled:
+            return []
+
+        configured_models = self._config.warmup_models or sorted(self._model_registry.keys())
+        if not configured_models:
+            configured_models = ["default"]
+        configured_devices = self._config.warmup_devices or ["auto"]
+        probe_texts = self._config.warmup_probe_texts or ["warmup"]
+
+        warmed: list[dict[str, str]] = []
+        seen_profiles: set[str] = set()
+        for model_name in configured_models:
+            for requested_device in configured_devices:
+                profile_name, profile = self.resolve_profile(model_name, requested_device)
+                if profile_name in seen_profiles:
+                    continue
+                await asyncio.to_thread(
+                    self._warmup_sync,
+                    probe_texts,
+                    profile_name,
+                    profile,
+                )
+                seen_profiles.add(profile_name)
+                warmed.append(
+                    {
+                        "profile": profile_name,
+                        "model": profile.model_name,
+                        "device": profile.device or self._config.device,
+                    }
+                )
+        return warmed
 
     def resolve_profile(
         self,
@@ -55,6 +93,21 @@ class LocalEmbeddingBackend:
         if model_name and model_name in self._model_registry:
             profile = self._model_registry[model_name]
             profile_name = model_name
+        elif model_name:
+            alias = self._profile_alias_for_model_name(model_name)
+            if alias is not None:
+                profile_name = alias
+                profile = self._model_registry[alias]
+            else:
+                profile_name = model_name or "runtime"
+                profile = EmbeddingModelConfig(
+                    backend=self._config.backend,
+                    model_name=model_name or self._config.default_model,
+                    vector_size=None,
+                    distance="Cosine",
+                    normalize_embeddings=self._config.normalize_embeddings,
+                    device=self._config.device,
+                )
         elif model_name is None and "default" in self._model_registry:
             profile_name = "default"
             profile = self._model_registry["default"]
@@ -74,11 +127,17 @@ class LocalEmbeddingBackend:
         runtime_profile = profile.model_copy(update={"device": resolved_device})
         return runtime_profile_name, runtime_profile
 
+    def _profile_alias_for_model_name(self, model_name: str) -> str | None:
+        for alias, profile in self._model_registry.items():
+            if profile.model_name == model_name:
+                return alias
+        return None
+
     def available_devices(self) -> list[str]:
         devices = ["cpu"]
         try:
             import torch
-        except ImportError:
+        except (ImportError, OSError):
             return devices
 
         if torch.cuda.is_available():
@@ -120,6 +179,25 @@ class LocalEmbeddingBackend:
             convert_to_numpy=True,
         )
         return vectors.tolist()
+
+    def _warmup_sync(
+        self,
+        texts: list[str],
+        profile_name: str,
+        profile: EmbeddingModelConfig,
+    ) -> None:
+        model = self._get_or_load_model(profile_name, profile)
+        model.encode(
+            texts,
+            batch_size=1,
+            normalize_embeddings=(
+                self._config.normalize_embeddings
+                if profile.normalize_embeddings is None
+                else profile.normalize_embeddings
+            ),
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )
 
     def _get_or_load_model(self, profile_name: str, profile: EmbeddingModelConfig):
         with self._lock:
