@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "timezone": "Asia/Shanghai",
+  "items": [
+    {
+      "id": "knowledge-batch-3",
+      "logical_collection": "knowledge",
+      "task_file": "/opt/docker/db_migrator_git/tasks/gp_knowledge_v2_to_v3.yaml",
+      "shards": ["xingyun", "editor"],
+      "window": {
+        "start": "00:30",
+        "stop_dispatch": "01:05",
+        "pause_at": "01:10"
+      },
+      "status": "queued",
+      "note": "small tail batch"
+    },
+    {
+      "id": "knowledge-batch-4",
+      "logical_collection": "knowledge",
+      "task_file": "/opt/docker/db_migrator_git/tasks/gp_knowledge_v2_to_v3.yaml",
+      "shards": ["fowler", "pavlo"],
+      "window": {
+        "start": "02:30",
+        "stop_dispatch": "03:05",
+        "pause_at": "03:10"
+      },
+      "status": "queued",
+      "note": "medium overnight batch"
+    },
+    {
+      "id": "decision-memory-legacy",
+      "logical_collection": "decision_memory",
+      "task_file": "/app/tasks/gp_decision_memory_v1_to_v2_legacy.yaml",
+      "shards": [],
+      "window": {
+        "start": "04:30",
+        "stop_dispatch": "05:05",
+        "pause_at": "05:10"
+      },
+      "status": "queued",
+      "note": "legacy created_at bucket"
+    },
+    {
+      "id": "decision-memory-recent",
+      "logical_collection": "decision_memory",
+      "task_file": "/app/tasks/gp_decision_memory_v1_to_v2_recent.yaml",
+      "shards": [],
+      "window": {
+        "start": "06:30",
+        "stop_dispatch": "07:05",
+        "pause_at": "07:10"
+      },
+      "status": "queued",
+      "note": "recent created_at bucket"
+    }
+  ]
+}
