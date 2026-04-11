@@ -129,12 +129,26 @@ Queue configuration can also steer the default embedding device:
 
 Request payloads can still override this with `device`.
 
+The gateway now validates dense vector size at the API boundary and before Qdrant writes:
+
+- wrong-size query vectors are rejected as `400`, not forwarded as Qdrant `500`
+- wrong-size write vectors are rejected before upsert
+- wrong model-to-collection pairings are rejected when the model registry exposes vector size
+- blank texts, empty id lists, empty payload patches, and illegal `search_mode` values are rejected at request validation time
+- malformed sparse vectors are rejected before they can reach scheduler or Qdrant
+- upserts to dense or hybrid collections must still include a usable dense vector payload
+
 Model registry and collection registry are intentionally decoupled:
 
 - collections can move to a new embedding model over time
 - migrations can re-embed into a different vector size without changing caller code
 - external migration workers can target `/transform/embed` as a stable callback endpoint
 - migration orchestration can store partition and checkpoint metadata without changing caller code
+
+Current production migration shape:
+
+- `knowledge`: hybrid target, `dense + sparse`
+- `decision_memory`: hybrid `v2` target, with new traffic already routed to `decision_memory_v2` and legacy data backfilled asynchronously
 
 ## Request model
 
@@ -237,6 +251,8 @@ CPU-only deployment:
 ```bash
 VECTOR_GATEWAY_GPU_MODE=off ./deploy.sh
 ```
+
+`./deploy.sh hotpatch` restarts the running container. Treat it as a short service interruption and avoid using it during an active migration slice unless the change is urgent.
 
 ## Project layout
 

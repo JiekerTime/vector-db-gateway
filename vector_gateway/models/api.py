@@ -2,9 +2,93 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
+
+_MAX_QUERY_LIMIT = 1000
+_MAX_BATCH_ITEMS = 1000
+
+
+def _is_blank(value: str | None) -> bool:
+    return value is None or not value.strip()
+
+
+def _validate_text_value(value: str | None, field_name: str) -> None:
+    if _is_blank(value):
+        raise ValueError(f"'{field_name}' must not be blank")
+
+
+def _validate_text_items(items: list[str] | None, field_name: str) -> None:
+    if not items:
+        raise ValueError(f"'{field_name}' must not be empty")
+    for index, item in enumerate(items):
+        if _is_blank(item):
+            raise ValueError(f"'{field_name}[{index}]' must not be blank")
+
+
+def _validate_dense_vector(vector: list[float] | None, field_name: str) -> None:
+    if vector is None:
+        return
+    if not vector:
+        raise ValueError(f"'{field_name}' must not be empty")
+    for index, value in enumerate(vector):
+        if not math.isfinite(value):
+            raise ValueError(f"'{field_name}[{index}]' must be a finite number")
+
+
+def _validate_sparse_vector(value: dict[str, Any], field_name: str) -> None:
+    indices = value.get("indices")
+    values = value.get("values")
+    if not isinstance(indices, list) or not isinstance(values, list):
+        raise ValueError(f"'{field_name}' sparse vector must include list 'indices' and 'values'")
+    if not indices:
+        raise ValueError(f"'{field_name}.indices' must not be empty")
+    if len(indices) != len(values):
+        raise ValueError(f"'{field_name}' sparse vector requires the same number of indices and values")
+    previous = -1
+    for index, item in enumerate(indices):
+        if not isinstance(item, int):
+            raise ValueError(f"'{field_name}.indices[{index}]' must be an integer")
+        if item < 0:
+            raise ValueError(f"'{field_name}.indices[{index}]' must be non-negative")
+        if item <= previous:
+            raise ValueError(f"'{field_name}.indices' must be strictly increasing")
+        previous = item
+    for index, item in enumerate(values):
+        if not isinstance(item, (int, float)) or not math.isfinite(float(item)):
+            raise ValueError(f"'{field_name}.values[{index}]' must be a finite number")
+
+
+def _validate_named_vector_map(vector: dict[str, Any], field_name: str) -> None:
+    if not vector:
+        raise ValueError(f"'{field_name}' must not be empty")
+    for key, value in vector.items():
+        if not key or not key.strip():
+            raise ValueError(f"'{field_name}' contains an empty vector name")
+        if isinstance(value, list):
+            _validate_dense_vector(value, f"{field_name}.{key}")
+            continue
+        if isinstance(value, dict):
+            _validate_sparse_vector(value, f"{field_name}.{key}")
+            continue
+        raise ValueError(f"'{field_name}.{key}' must be a dense float list or sparse vector object")
+
+
+def _validate_ids(items: list[str | int], field_name: str) -> None:
+    if not items:
+        raise ValueError(f"'{field_name}' must not be empty")
+    if len(items) > _MAX_BATCH_ITEMS:
+        raise ValueError(f"'{field_name}' must contain at most {_MAX_BATCH_ITEMS} items")
+    for index, item in enumerate(items):
+        if isinstance(item, str) and not item.strip():
+            raise ValueError(f"'{field_name}[{index}]' must not be blank")
+
+
+def _validate_limit(limit: int, field_name: str) -> None:
+    if limit < 1 or limit > _MAX_QUERY_LIMIT:
+        raise ValueError(f"'{field_name}' must be between 1 and {_MAX_QUERY_LIMIT}")
 
 
 class EmbedRequest(BaseModel):
@@ -19,8 +103,14 @@ class EmbedRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_payload(self) -> "EmbedRequest":
+        if self.text is not None and self.texts:
+            raise ValueError("Provide either 'text' or 'texts', not both")
         if self.text is None and not self.texts:
             raise ValueError("One of 'text' or 'texts' is required")
+        if self.text is not None:
+            _validate_text_value(self.text, "text")
+        if self.texts is not None:
+            _validate_text_items(self.texts, "texts")
         return self
 
     def text_items(self) -> list[str]:
@@ -49,6 +139,11 @@ class TransformEmbedRequest(BaseModel):
     caller: str = "batch/migration"
     operation: str = "backfill"
 
+    @model_validator(mode="after")
+    def validate_payload(self) -> "TransformEmbedRequest":
+        _validate_text_items(self.texts, "texts")
+        return self
+
 
 class TransformEmbedResponse(BaseModel):
     model: str
@@ -75,10 +170,25 @@ class SearchRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_payload(self) -> "SearchRequest":
-        if self.text is None and self.vector is None:
-            raise ValueError("One of 'text' or 'vector' is required")
+        if self.text is not None:
+            _validate_text_value(self.text, "text")
+        if self.query_text is not None:
+            _validate_text_value(self.query_text, "query_text")
+        if self.text is None and self.query_text is None and self.vector is None:
+            raise ValueError("One of 'text', 'query_text', or 'vector' is required")
         if self.query_text is None and self.text is not None:
             self.query_text = self.text
+        _validate_dense_vector(self.vector, "vector")
+        _validate_limit(self.limit, "limit")
+        mode = (self.search_mode or "auto").lower()
+        if mode not in {"auto", "dense", "sparse", "hybrid"}:
+            raise ValueError("'search_mode' must be one of: auto, dense, sparse, hybrid")
+        self.search_mode = mode
+        if mode == "sparse":
+            if self.vector is not None:
+                raise ValueError("'vector' is not allowed when 'search_mode' is 'sparse'")
+            if _is_blank(self.query_text):
+                raise ValueError("'query_text' or 'text' is required when 'search_mode' is 'sparse'")
         return self
 
 
@@ -106,6 +216,11 @@ class ScrollRequest(BaseModel):
     limit: int = 100
     with_payload: bool = True
     with_vectors: bool = False
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> "ScrollRequest":
+        _validate_limit(self.limit, "limit")
+        return self
 
 
 class ScrollPoint(BaseModel):
@@ -149,6 +264,9 @@ class UpsertChunk(BaseModel):
     def validate_payload(self) -> "UpsertChunk":
         if self.text is None and self.vector is None:
             raise ValueError("Each chunk requires either 'text' or 'vector'")
+        if self.text is not None:
+            _validate_text_value(self.text, "text")
+        _validate_dense_vector(self.vector, "vector")
         return self
 
 
@@ -161,11 +279,27 @@ class UpsertChunksRequest(BaseModel):
     wait: bool = True
     chunks: list[UpsertChunk]
 
+    @model_validator(mode="after")
+    def validate_payload(self) -> "UpsertChunksRequest":
+        if not self.chunks:
+            raise ValueError("'chunks' must not be empty")
+        if len(self.chunks) > _MAX_BATCH_ITEMS:
+            raise ValueError(f"'chunks' must contain at most {_MAX_BATCH_ITEMS} items")
+        return self
+
 
 class UpsertPoint(BaseModel):
     id: str | int | None = None
     vector: list[float] | dict[str, Any]
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> "UpsertPoint":
+        if isinstance(self.vector, list):
+            _validate_dense_vector(self.vector, "vector")
+        else:
+            _validate_named_vector_map(self.vector, "vector")
+        return self
 
 
 class UpsertPointsRequest(BaseModel):
@@ -174,6 +308,14 @@ class UpsertPointsRequest(BaseModel):
     collection: str
     wait: bool = True
     points: list[UpsertPoint]
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> "UpsertPointsRequest":
+        if not self.points:
+            raise ValueError("'points' must not be empty")
+        if len(self.points) > _MAX_BATCH_ITEMS:
+            raise ValueError(f"'points' must contain at most {_MAX_BATCH_ITEMS} items")
+        return self
 
 
 class UpsertResponse(BaseModel):
@@ -216,6 +358,24 @@ class EnsureCollectionRequest(BaseModel):
     write_model: str | None = None
     aliases: list[str] = Field(default_factory=list)
     description: str | None = None
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> "EnsureCollectionRequest":
+        _validate_text_value(self.collection, "collection")
+        if self.vector_size < 1:
+            raise ValueError("'vector_size' must be greater than 0")
+        if self.vector_name is not None:
+            _validate_text_value(self.vector_name, "vector_name")
+        if self.sparse_vector_name is not None:
+            _validate_text_value(self.sparse_vector_name, "sparse_vector_name")
+        if self.vector_name and self.sparse_vector_name and self.vector_name == self.sparse_vector_name:
+            raise ValueError("'vector_name' and 'sparse_vector_name' must be different")
+        for index, alias in enumerate(self.aliases):
+            if not alias.strip():
+                raise ValueError(f"'aliases[{index}]' must not be blank")
+        if len(set(self.aliases)) != len(self.aliases):
+            raise ValueError("'aliases' must not contain duplicates")
+        return self
 
 
 class EnsureCollectionResponse(BaseModel):
@@ -361,6 +521,11 @@ class RetrieveRequest(BaseModel):
     with_payload: bool = True
     with_vectors: bool = False
 
+    @model_validator(mode="after")
+    def validate_payload(self) -> "RetrieveRequest":
+        _validate_ids(self.ids, "ids")
+        return self
+
 
 class RetrievePoint(BaseModel):
     id: str
@@ -385,6 +550,13 @@ class PayloadSetRequest(BaseModel):
     payload: dict[str, Any]
     wait: bool = True
 
+    @model_validator(mode="after")
+    def validate_payload(self) -> "PayloadSetRequest":
+        _validate_ids(self.ids, "ids")
+        if not self.payload:
+            raise ValueError("'payload' must not be empty")
+        return self
+
 
 class PayloadPatchRequest(BaseModel):
     caller: str = "batch/default"
@@ -393,6 +565,14 @@ class PayloadPatchRequest(BaseModel):
     id: str | int
     payload: dict[str, Any]
     wait: bool = True
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> "PayloadPatchRequest":
+        if isinstance(self.id, str) and not self.id.strip():
+            raise ValueError("'id' must not be blank")
+        if not self.payload:
+            raise ValueError("'payload' must not be empty")
+        return self
 
 
 class PayloadUpdateResponse(BaseModel):
@@ -406,6 +586,11 @@ class PayloadUpdateResponse(BaseModel):
 
 class TransformSparseRequest(BaseModel):
     texts: list[str]
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> "TransformSparseRequest":
+        _validate_text_items(self.texts, "texts")
+        return self
 
 
 class SparseVectorPayload(BaseModel):

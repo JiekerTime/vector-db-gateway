@@ -139,6 +139,31 @@ class LogicalRegistryTest(unittest.TestCase):
             self.assertEqual(events[1]["event"], "prepare")
             self.assertEqual(events[1]["metadata"]["partition_key"], "expert_id")
 
+    def test_bootstrap_aligns_idle_state_with_config_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _gateway_config(tmpdir)
+            store = MigrationStateStore(tmpdir)
+            registry = LogicalCollectionRegistry(config, store)
+
+            registry.bootstrap()
+            store.update_state(
+                "knowledge",
+                event="manual_override",
+                state="idle",
+                read_target="knowledge_base_v3",
+                write_targets=["knowledge_base_v3"],
+                rollback_target="knowledge_base_v2",
+            )
+
+            registry.bootstrap()
+
+            state = registry.get_state("knowledge")
+            events = registry.list_events("knowledge", limit=1)
+            self.assertEqual(state["read_target"], "knowledge_base_v2")
+            self.assertEqual(state["write_targets"], ["knowledge_base_v2"])
+            self.assertEqual(state["rollback_target"], "knowledge_base_v2")
+            self.assertEqual(events[0]["event"], "bootstrap_sync")
+
 
 if __name__ == "__main__":
     unittest.main()

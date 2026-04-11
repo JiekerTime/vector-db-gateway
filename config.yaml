@@ -120,11 +120,13 @@ collections:
     distance: "Cosine"
     owner: "group_portrait"
     vector_name: "dense"
+    sparse_vector_name: "sparse"
+    sparse_modifier: "idf"
     model: "default"
     query_model: "default"
     write_model: "default"
     aliases: []
-    description: "Gateway-managed decision memory collection"
+    description: "Gateway-managed hybrid decision memory collection"
 
 logical_collections:
   knowledge:
@@ -139,9 +141,9 @@ logical_collections:
       scheduler: "n8n"
       job_name: "gp-knowledge-v2-to-v3"
   decision_memory:
-    read_targets: ["decision_memory_v1"]
-    write_targets: ["decision_memory_v1"]
-    default_query_mode: "dense"
+    read_targets: ["decision_memory_v2"]
+    write_targets: ["decision_memory_v2"]
+    default_query_mode: "hybrid"
     alias_name: "decision_memory"
     query_model: "default"
     write_model: "default"

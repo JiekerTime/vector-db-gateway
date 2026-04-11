@@ -194,6 +194,21 @@ That lets `do-mig` resume safely:
 3. compare its own queued task with the last recorded phase and checkpoint
 4. continue with the next partition batch or resume the paused one
 
+## Operational Notes From 2026-04-12
+
+Two production lessons are now part of the migration contract:
+
+- dense vector size mismatches must fail at the gateway boundary as `400`, not bubble out as Qdrant `500`
+- hotpatching the gateway restarts the container, so it must be treated as an online interruption even if the current migration queue is idle
+
+For the current production shape:
+
+- `knowledge` migrates from dense-only `v2` to hybrid `v3`
+- `decision_memory` now treats `v2` as the live target and stores both dense and sparse vectors
+- legacy `decision_memory_v1` data can backfill later; callers should not keep reading from the old physical collection
+
+If a target collection is still empty and its schema is outdated, the gateway may recreate it at startup so the configured vector shape remains the single source of truth.
+
 ## Agent And CLI Integration
 
 Machine clients can use:

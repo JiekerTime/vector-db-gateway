@@ -262,6 +262,18 @@ class QdrantStore:
             "sparse_vector_name": meta.sparse_vector_name,
         }
         if actual != expected:
+            result = self._collection_result(details)
+            points_count = _safe_int(result.get("points_count")) or 0
+            indexed_vectors_count = _safe_int(result.get("indexed_vectors_count")) or 0
+            if points_count == 0 and indexed_vectors_count == 0:
+                self._recreate_collection(collection, meta)
+                logger.info(
+                    "Recreated empty Qdrant collection collection=%s expected=%s actual=%s",
+                    collection,
+                    expected,
+                    actual,
+                )
+                return
             logger.warning(
                 "Registered collection differs from Qdrant collection=%s expected=%s actual=%s",
                 collection,
@@ -313,6 +325,11 @@ class QdrantStore:
             sparse_vectors_config=sparse_vectors_config,
         )
 
+    def _recreate_collection(self, collection: str, meta: CollectionConfig) -> None:
+        client = self._get_client()
+        client.delete_collection(collection_name=collection)
+        self._create_collection(collection, meta)
+
     def _get_collection(self, collection: str) -> dict[str, Any]:
         client = self._get_client()
         result = client.get_collection(collection_name=collection)
@@ -336,6 +353,7 @@ class QdrantStore:
         models = self._models()
         normalized_mode = (query_mode or "dense").lower()
         sparse_query = self._sparse_query(models, sparse_vector)
+        self._validate_dense_vector_size(collection, meta, dense_vector)
 
         if normalized_mode == "hybrid" and dense_vector and sparse_query and meta.sparse_vector_name:
             response = client.query_points(
@@ -577,10 +595,15 @@ class QdrantStore:
                 sparse = self._sparse_vector_from_payload(payload)
                 if sparse is not None:
                     built[meta.sparse_vector_name] = sparse
+            dense_vector = self._dense_vector_value(meta, built)
+            if dense_vector is None:
+                raise ValueError(f"Collection '{collection}' requires a dense vector payload")
+            self._validate_dense_vector_size(collection, meta, dense_vector)
             if meta.vector_name is None and len(built) == 1 and meta.sparse_vector_name not in built:
                 return next(iter(built.values()))
             return built
 
+        self._validate_dense_vector_size(collection, meta, vector)
         if meta.vector_name or meta.sparse_vector_name:
             built: dict[str, Any] = {}
             dense_name = meta.vector_name or "dense"
@@ -610,6 +633,36 @@ class QdrantStore:
         if not indices:
             return None
         return models.SparseVector(indices=indices, values=values)
+
+    def _validate_dense_vector_size(
+        self,
+        collection: str,
+        meta: CollectionConfig,
+        dense_vector: list[float] | None,
+    ) -> None:
+        if dense_vector is None:
+            return
+        actual_size = len(dense_vector)
+        if actual_size != meta.vector_size:
+            raise ValueError(
+                f"Collection '{collection}' expects dense vector size {meta.vector_size}, got {actual_size}"
+            )
+
+    def _dense_vector_value(self, meta: CollectionConfig, vector: dict[str, Any]) -> list[float] | None:
+        if meta.vector_name:
+            dense = vector.get(meta.vector_name)
+            return dense if isinstance(dense, list) else None
+        if meta.sparse_vector_name:
+            for key, value in vector.items():
+                if key == meta.sparse_vector_name:
+                    continue
+                if isinstance(value, list):
+                    return value
+            return None
+        if len(vector) == 1:
+            value = next(iter(vector.values()))
+            return value if isinstance(value, list) else None
+        return None
 
     def _models(self):
         try:

@@ -446,8 +446,10 @@ async def search(request: SearchRequest, x_api_key: str = Header(default="")):
     query_mode = _resolved_query_mode(request.collection, physical_collection, request.search_mode)
     vector = request.vector
     queue_wait_ms = 0
+    _validate_dense_request_vector(physical_collection, vector)
     if vector is None and query_mode != "sparse":
         model_ref = request.model or _default_model_ref(request.collection, purpose="query")
+        _validate_model_for_collection(physical_collection, model_ref, purpose="query")
         embed_result = await _embed_batcher.submit(
             request_id=request_id,
             texts=[request.text or request.query_text or ""],
@@ -480,12 +482,15 @@ async def search(request: SearchRequest, x_api_key: str = Header(default="")):
             with_vectors=request.with_vectors,
         )
 
-    hits, scheduled_wait_ms = await _job_scheduler.submit(
-        request_id=request_id,
-        endpoint="search",
-        route=route,
-        factory=run_search,
-    )
+    try:
+        hits, scheduled_wait_ms = await _job_scheduler.submit(
+            request_id=request_id,
+            endpoint="search",
+            route=route,
+            factory=run_search,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     total_wait_ms = queue_wait_ms + scheduled_wait_ms
     latency_ms = int((time.monotonic() - started) * 1000)
     _metrics.observe_request("search", latency_ms=latency_ms, queue_wait_ms=total_wait_ms)
@@ -516,12 +521,15 @@ async def scroll(request: ScrollRequest, x_api_key: str = Header(default="")):
             with_vectors=request.with_vectors,
         )
 
-    points, queue_wait_ms = await _job_scheduler.submit(
-        request_id=request_id,
-        endpoint="scroll",
-        route=route,
-        factory=run_scroll,
-    )
+    try:
+        points, queue_wait_ms = await _job_scheduler.submit(
+            request_id=request_id,
+            endpoint="scroll",
+            route=route,
+            factory=run_scroll,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     latency_ms = int((time.monotonic() - started) * 1000)
     _metrics.observe_request("scroll", latency_ms=latency_ms, queue_wait_ms=queue_wait_ms)
     return ScrollResponse(
@@ -550,12 +558,15 @@ async def retrieve(request: RetrieveRequest, x_api_key: str = Header(default="")
             with_vectors=request.with_vectors,
         )
 
-    points, queue_wait_ms = await _job_scheduler.submit(
-        request_id=request_id,
-        endpoint="retrieve",
-        route=route,
-        factory=run_retrieve,
-    )
+    try:
+        points, queue_wait_ms = await _job_scheduler.submit(
+            request_id=request_id,
+            endpoint="retrieve",
+            route=route,
+            factory=run_retrieve,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     latency_ms = int((time.monotonic() - started) * 1000)
     _metrics.observe_request("retrieve", latency_ms=latency_ms, queue_wait_ms=queue_wait_ms)
     return RetrieveResponse(
@@ -579,12 +590,15 @@ async def count(request: CountRequest, x_api_key: str = Header(default="")):
     async def run_count():
         return await _qdrant.count(collection=physical_collection, filter_spec=request.filter)
 
-    total, queue_wait_ms = await _job_scheduler.submit(
-        request_id=request_id,
-        endpoint="count",
-        route=route,
-        factory=run_count,
-    )
+    try:
+        total, queue_wait_ms = await _job_scheduler.submit(
+            request_id=request_id,
+            endpoint="count",
+            route=route,
+            factory=run_count,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     latency_ms = int((time.monotonic() - started) * 1000)
     _metrics.observe_request("count", latency_ms=latency_ms, queue_wait_ms=queue_wait_ms)
     return CountResponse(
@@ -616,12 +630,15 @@ async def set_payload(request: PayloadSetRequest, x_api_key: str = Header(defaul
             )
         return updated
 
-    updated, queue_wait_ms = await _job_scheduler.submit(
-        request_id=request_id,
-        endpoint="set_payload",
-        route=route,
-        factory=run_set_payload,
-    )
+    try:
+        updated, queue_wait_ms = await _job_scheduler.submit(
+            request_id=request_id,
+            endpoint="set_payload",
+            route=route,
+            factory=run_set_payload,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     latency_ms = int((time.monotonic() - started) * 1000)
     _metrics.observe_request("set_payload", latency_ms=latency_ms, queue_wait_ms=queue_wait_ms)
     return PayloadUpdateResponse(
@@ -653,12 +670,15 @@ async def patch_payload(request: PayloadPatchRequest, x_api_key: str = Header(de
             )
         return updated
 
-    updated, queue_wait_ms = await _job_scheduler.submit(
-        request_id=request_id,
-        endpoint="patch_payload",
-        route=route,
-        factory=run_patch_payload,
-    )
+    try:
+        updated, queue_wait_ms = await _job_scheduler.submit(
+            request_id=request_id,
+            endpoint="patch_payload",
+            route=route,
+            factory=run_patch_payload,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     latency_ms = int((time.monotonic() - started) * 1000)
     _metrics.observe_request("patch_payload", latency_ms=latency_ms, queue_wait_ms=queue_wait_ms)
     return PayloadUpdateResponse(
@@ -688,6 +708,7 @@ async def upsert_chunks(request: UpsertChunksRequest, x_api_key: str = Header(de
         request_id,
     )
     write_targets = _write_targets(request.collection)
+    _validate_upsert_points_for_targets(write_targets, points)
 
     async def run_upsert():
         upserted = 0
@@ -699,12 +720,15 @@ async def upsert_chunks(request: UpsertChunksRequest, x_api_key: str = Header(de
             )
         return upserted
 
-    upserted, scheduled_wait_ms = await _job_scheduler.submit(
-        request_id=request_id,
-        endpoint="upsert_chunks",
-        route=route,
-        factory=run_upsert,
-    )
+    try:
+        upserted, scheduled_wait_ms = await _job_scheduler.submit(
+            request_id=request_id,
+            endpoint="upsert_chunks",
+            route=route,
+            factory=run_upsert,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     latency_ms = int((time.monotonic() - started) * 1000)
     total_wait_ms = embed_wait_ms + scheduled_wait_ms
     _metrics.observe_request("upsert_chunks", latency_ms=latency_ms, queue_wait_ms=total_wait_ms)
@@ -726,6 +750,7 @@ async def upsert_points(request: UpsertPointsRequest, x_api_key: str = Header(de
     route = _router.resolve(request.caller, request.operation)
     points = [UpsertPoint(id=point.id, vector=point.vector, payload=point.payload) for point in request.points]
     write_targets = _write_targets(request.collection)
+    _validate_upsert_points_for_targets(write_targets, points)
 
     async def run_upsert():
         upserted = 0
@@ -737,12 +762,15 @@ async def upsert_points(request: UpsertPointsRequest, x_api_key: str = Header(de
             )
         return upserted
 
-    upserted, queue_wait_ms = await _job_scheduler.submit(
-        request_id=request_id,
-        endpoint="upsert_points",
-        route=route,
-        factory=run_upsert,
-    )
+    try:
+        upserted, queue_wait_ms = await _job_scheduler.submit(
+            request_id=request_id,
+            endpoint="upsert_points",
+            route=route,
+            factory=run_upsert,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     latency_ms = int((time.monotonic() - started) * 1000)
     _metrics.observe_request("upsert_points", latency_ms=latency_ms, queue_wait_ms=queue_wait_ms)
     return UpsertResponse(
@@ -798,6 +826,8 @@ async def _prepare_upsert_points(
     embedded_vectors: list[list[float]] = []
     if texts:
         model_ref = model_name or _default_model_ref(collection_name, purpose="write")
+        for target in _write_targets(collection_name):
+            _validate_model_for_collection(target, model_ref, purpose="write")
         embed_result = await _embed_batcher.submit(
             request_id=request_id,
             texts=texts,
@@ -973,6 +1003,81 @@ def _search_sparse_vector(
     if not indices:
         return None
     return {"indices": indices, "values": values}
+
+
+def _collection_dense_vector_size(collection_name: str) -> int | None:
+    meta = _config.collections.get(collection_name)
+    if meta is None:
+        return None
+    return meta.vector_size
+
+
+def _validate_dense_request_vector(collection_name: str, vector: list[float] | None) -> None:
+    if vector is None:
+        return
+    expected_size = _collection_dense_vector_size(collection_name)
+    if expected_size is None:
+        return
+    actual_size = len(vector)
+    if actual_size != expected_size:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Collection '{collection_name}' expects dense vector size {expected_size}, got {actual_size}",
+        )
+
+
+def _validate_model_for_collection(collection_name: str, model_ref: str, *, purpose: str) -> None:
+    expected_size = _collection_dense_vector_size(collection_name)
+    if expected_size is None:
+        return
+    profile = _model_registry.get(model_ref)
+    if profile is None or profile.vector_size is None:
+        return
+    if profile.vector_size != expected_size:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model '{model_ref}' produces {profile.vector_size}-dim vectors "
+                f"but collection '{collection_name}' expects {expected_size} for {purpose}"
+            ),
+        )
+
+
+def _validate_upsert_points_for_targets(targets: list[str], points: list[UpsertPoint]) -> None:
+    for target in targets:
+        for point in points:
+            dense_vector = _extract_dense_request_vector(target, point.vector)
+            if dense_vector is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Collection '{target}' requires a dense vector payload for upsert",
+                )
+            _validate_dense_request_vector(target, dense_vector)
+
+
+def _extract_dense_request_vector(
+    collection_name: str,
+    vector: list[float] | dict[str, object],
+) -> list[float] | None:
+    if isinstance(vector, list):
+        return vector
+    meta = _config.collections.get(collection_name)
+    if meta is None:
+        return None
+    if meta.vector_name:
+        candidate = vector.get(meta.vector_name)
+        return candidate if isinstance(candidate, list) else None
+    if meta.sparse_vector_name:
+        for key, value in vector.items():
+            if key == meta.sparse_vector_name:
+                continue
+            if isinstance(value, list):
+                return value
+        return None
+    if len(vector) == 1:
+        candidate = next(iter(vector.values()))
+        return candidate if isinstance(candidate, list) else None
+    return None
 
 
 async def _physical_info_map() -> dict[str, CollectionInfo]:

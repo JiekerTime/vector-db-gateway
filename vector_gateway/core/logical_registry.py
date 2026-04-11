@@ -17,13 +17,15 @@ class LogicalCollectionRegistry:
     def bootstrap(self) -> None:
         for logical_name, meta in self._config.logical_collections.items():
             read_target = meta.read_targets[0] if meta.read_targets else None
-            self._state_store.ensure_state(
+            write_targets = list(meta.write_targets or meta.read_targets)
+            state = self._state_store.ensure_state(
                 logical_name,
                 state="idle",
                 read_target=read_target,
-                write_targets=list(meta.write_targets or meta.read_targets),
+                write_targets=write_targets,
                 rollback_target=read_target,
             )
+            self._sync_idle_state(logical_name, state=state, read_target=read_target, write_targets=write_targets)
 
     def is_logical(self, collection_name: str) -> bool:
         return collection_name in self._config.logical_collections
@@ -111,6 +113,36 @@ class LogicalCollectionRegistry:
 
     def get_info(self, logical_name: str, physical_infos: dict[str, CollectionInfo]) -> LogicalCollectionInfo:
         return self.current_info(logical_name, physical_infos)
+
+    def _sync_idle_state(
+        self,
+        logical_name: str,
+        *,
+        state: dict,
+        read_target: str | None,
+        write_targets: list[str],
+    ) -> None:
+        if str(state.get("state") or "idle") != "idle":
+            return
+        current_read_target = state.get("read_target")
+        current_write_targets = [str(item) for item in state.get("write_targets") or []]
+        if current_read_target == read_target and current_write_targets == write_targets:
+            return
+        rollback_target = state.get("rollback_target") or current_read_target or read_target
+        self._state_store.update_state(
+            logical_name,
+            event="bootstrap_sync",
+            state="idle",
+            read_target=read_target,
+            write_targets=write_targets,
+            rollback_target=rollback_target,
+            note="Aligned idle logical collection with config defaults",
+            metadata={
+                "read_target": read_target,
+                "write_targets": write_targets,
+                "rollback_target": rollback_target,
+            },
+        )
 
     def ensure_target(self, logical_name: str) -> str:
         logical = self.get_logical_config(logical_name)

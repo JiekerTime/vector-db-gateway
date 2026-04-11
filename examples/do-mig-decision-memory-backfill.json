@@ -19,6 +19,7 @@
     "source_collection": "decision_memory_v1",
     "target_collection": "decision_memory_v2",
     "embedding_callback": "/transform/embed",
+    "sparse_callback": "/transform/bm25_sparse",
     "payload_scope_fields": ["primary_expert_id", "expert_ids", "domain", "meeting_mode"]
   }
 }

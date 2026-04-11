@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,7 +24,7 @@ class MigrationStateStore:
         return sqlite3.connect(self._db_path)
 
     def _init_db(self) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS logical_collection_state (
@@ -85,7 +86,7 @@ class MigrationStateStore:
             "note": None,
             "updated_at": now,
         }
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.execute(
                 """
                 INSERT INTO logical_collection_state
@@ -126,7 +127,7 @@ class MigrationStateStore:
         return payload
 
     def get_state(self, logical_name: str) -> dict | None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             row = conn.execute(
                 """
                 SELECT logical_name, state, read_target, write_targets, shadow_read_targets,
@@ -142,7 +143,7 @@ class MigrationStateStore:
         return _row_to_state(row)
 
     def list_states(self) -> list[dict]:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             rows = conn.execute(
                 """
                 SELECT logical_name, state, read_target, write_targets, shadow_read_targets,
@@ -163,7 +164,7 @@ class MigrationStateStore:
         payload = dict(current)
         payload.update({key: value for key, value in changes.items() if value is not None or key in {"read_target", "task_id", "note"}})
         payload["updated_at"] = _utc_now()
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.execute(
                 """
                 UPDATE logical_collection_state
@@ -208,7 +209,7 @@ class MigrationStateStore:
         return payload
 
     def list_events(self, logical_name: str, *, limit: int = 20) -> list[dict]:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             rows = conn.execute(
                 """
                 SELECT id, logical_name, event, state, task_id, note, metadata, created_at

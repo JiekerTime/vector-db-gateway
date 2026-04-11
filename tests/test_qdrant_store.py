@@ -97,6 +97,7 @@ class _FakeClient:
     def __init__(self) -> None:
         self.collections: dict[str, dict] = {}
         self.create_calls: list[tuple[str, object, object]] = []
+        self.delete_calls: list[str] = []
         self.alias_calls: list[list[object]] = []
         self.query_points_calls: list[dict[str, object]] = []
         self.upsert_calls: list[dict[str, object]] = []
@@ -114,7 +115,14 @@ class _FakeClient:
         payload = {"vectors": stored["vectors"]}
         if stored.get("sparse_vectors") is not None:
             payload["sparse_vectors"] = stored["sparse_vectors"]
-        return {"result": {"config": {"params": payload}}}
+        return {
+            "result": {
+                "config": {"params": payload},
+                "points_count": stored.get("points_count", 0),
+                "indexed_vectors_count": stored.get("indexed_vectors_count", 0),
+                "status": stored.get("status", "green"),
+            }
+        }
 
     def create_collection(self, collection_name: str, vectors_config, sparse_vectors_config=None):
         self.create_calls.append((collection_name, vectors_config, sparse_vectors_config))
@@ -138,7 +146,14 @@ class _FakeClient:
         self.collections[collection_name] = {
             "vectors": stored_vectors,
             "sparse_vectors": stored_sparse,
+            "points_count": 0,
+            "indexed_vectors_count": 0,
+            "status": "green",
         }
+
+    def delete_collection(self, *, collection_name: str):
+        self.delete_calls.append(collection_name)
+        self.collections.pop(collection_name, None)
 
     def update_collection_aliases(self, operations):
         self.alias_calls.append(list(operations))
@@ -309,6 +324,39 @@ class QdrantStoreBootstrapTest(unittest.TestCase):
         asyncio.run(store.ensure_collections())
 
         self.assertEqual(client.create_calls, [])
+        self.assertEqual(client.delete_calls, [])
+
+    def test_empty_collection_shape_mismatch_is_recreated(self) -> None:
+        client = _FakeClient()
+        client.collections["decision_memory_v2"] = {
+            "vectors": {
+                "dense": {
+                    "size": 1024,
+                    "distance": "Cosine",
+                }
+            },
+            "sparse_vectors": None,
+            "points_count": 0,
+            "indexed_vectors_count": 0,
+        }
+        store = _FakeQdrantStore(
+            client,
+            {
+                "decision_memory_v2": CollectionConfig(
+                    vector_size=1024,
+                    distance="Cosine",
+                    owner="default",
+                    vector_name="dense",
+                    sparse_vector_name="sparse",
+                    sparse_modifier="idf",
+                )
+            },
+        )
+
+        asyncio.run(store.ensure_collections())
+
+        self.assertEqual(client.delete_calls, ["decision_memory_v2"])
+        self.assertEqual(client.collections["decision_memory_v2"]["sparse_vectors"]["sparse"]["modifier"], "idf")
 
     def test_alias_sync_skips_existing_collection_name(self) -> None:
         client = _FakeClient()
@@ -430,6 +478,33 @@ class QdrantStoreBootstrapTest(unittest.TestCase):
         self.assertEqual(call["prefetch"][1].using, "sparse")
         self.assertEqual(call["query"].fusion, "rrf")
 
+    def test_search_rejects_dense_vector_size_mismatch(self) -> None:
+        client = _FakeClient()
+        client.collections["decision_memory_v2"] = {
+            "vectors": {
+                "dense": {
+                    "size": 1024,
+                    "distance": "Cosine",
+                }
+            },
+            "sparse_vectors": None,
+        }
+        store = _FakeQdrantStore(client, {})
+
+        with self.assertRaisesRegex(ValueError, "expects dense vector size 1024, got 384"):
+            asyncio.run(
+                store.search(
+                    collection="decision_memory_v2",
+                    dense_vector=[0.1] * 384,
+                    sparse_vector=None,
+                    query_mode="dense",
+                    limit=3,
+                    filter_spec=None,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            )
+
     def test_retrieve_and_set_payload_are_supported(self) -> None:
         client = _FakeClient()
         client.collections["decision_memory_v2"] = {
@@ -468,7 +543,7 @@ class QdrantStoreBootstrapTest(unittest.TestCase):
         client.collections["knowledge_base_v3"] = {
             "vectors": {
                 "dense": {
-                    "size": 1024,
+                    "size": 2,
                     "distance": "Cosine",
                 }
             },
@@ -492,6 +567,33 @@ class QdrantStoreBootstrapTest(unittest.TestCase):
         point = client.upsert_calls[0]["points"][0]
         self.assertIn("dense", point.vector)
         self.assertIn("sparse", point.vector)
+
+    def test_upsert_rejects_dense_vector_size_mismatch(self) -> None:
+        client = _FakeClient()
+        client.collections["decision_memory_v2"] = {
+            "vectors": {
+                "dense": {
+                    "size": 1024,
+                    "distance": "Cosine",
+                }
+            },
+            "sparse_vectors": None,
+        }
+        store = _FakeQdrantStore(client, {})
+
+        with self.assertRaisesRegex(ValueError, "expects dense vector size 1024, got 384"):
+            asyncio.run(
+                store.upsert_points(
+                    collection="decision_memory_v2",
+                    points=[
+                        UpsertPoint(
+                            id="d1",
+                            vector=[0.1] * 384,
+                            payload={"text": "legacy vector"},
+                        )
+                    ],
+                )
+            )
 
 
 if __name__ == "__main__":
