@@ -252,15 +252,27 @@ class QdrantStore:
         with_vectors: bool,
     ):
         client = self._get_client()
-        query_vector = vector if vector_name is None else (vector_name, vector)
-        return client.search(
+        if hasattr(client, "search"):
+            query_vector = vector if vector_name is None else (vector_name, vector)
+            return client.search(
+                collection_name=collection,
+                query_vector=query_vector,
+                query_filter=query_filter,
+                limit=limit,
+                with_payload=with_payload,
+                with_vectors=with_vectors,
+            )
+
+        response = client.query_points(
             collection_name=collection,
-            query_vector=query_vector,
+            query=vector,
+            using=vector_name,
             query_filter=query_filter,
             limit=limit,
             with_payload=with_payload,
             with_vectors=with_vectors,
         )
+        return getattr(response, "points", response)
 
     def _count_sync(self, collection: str, query_filter):
         client = self._get_client()

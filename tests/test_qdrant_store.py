@@ -26,6 +26,7 @@ class _FakeClient:
     def __init__(self) -> None:
         self.collections: dict[str, dict] = {}
         self.create_calls: list[tuple[str, object]] = []
+        self.query_points_calls: list[dict[str, object]] = []
 
     def get_collection(self, collection_name: str):
         if collection_name not in self.collections:
@@ -55,6 +56,40 @@ class _FakeClient:
             "size": vectors_config.size,
             "distance": vectors_config.distance,
         }
+
+    def query_points(
+        self,
+        *,
+        collection_name: str,
+        query,
+        using,
+        query_filter,
+        limit: int,
+        with_payload: bool,
+        with_vectors: bool,
+    ):
+        self.query_points_calls.append(
+            {
+                "collection_name": collection_name,
+                "query": query,
+                "using": using,
+                "query_filter": query_filter,
+                "limit": limit,
+                "with_payload": with_payload,
+                "with_vectors": with_vectors,
+            }
+        )
+        point = type(
+            "Point",
+            (),
+            {
+                "id": "p1",
+                "score": 0.9,
+                "payload": {"title": "doc"},
+                "vector": [0.1, 0.2],
+            },
+        )()
+        return type("QueryResponse", (), {"points": [point]})()
 
 
 class _FakeQdrantStore(QdrantStore):
@@ -150,6 +185,32 @@ class QdrantStoreBootstrapTest(unittest.TestCase):
         self.assertEqual(info.vector_size, 1024)
         self.assertEqual(info.owner, "external")
         self.assertIn("knowledge_base_v2", client.collections)
+
+    def test_search_uses_query_points_when_search_api_is_unavailable(self) -> None:
+        client = _FakeClient()
+        client.collections["knowledge_base_v2"] = {
+            "memory_vector": {
+                "size": 2,
+                "distance": "Cosine",
+            }
+        }
+        store = _FakeQdrantStore(client, {})
+
+        hits = asyncio.run(
+            store.search(
+                collection="knowledge_base_v2",
+                vector=[0.3, 0.4],
+                limit=3,
+                filter_spec=None,
+                with_payload=True,
+                with_vectors=True,
+            )
+        )
+
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].id, "p1")
+        self.assertEqual(client.query_points_calls[0]["using"], "memory_vector")
+        self.assertEqual(client.query_points_calls[0]["query"], [0.3, 0.4])
 
 
 if __name__ == "__main__":
