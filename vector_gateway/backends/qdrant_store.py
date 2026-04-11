@@ -27,6 +27,10 @@ class QdrantStore:
             return {"status": "down", "detail": str(exc)}
         return {"status": "ok", "collections": len(collections)}
 
+    async def ensure_collections(self) -> None:
+        for name, meta in self._collections.items():
+            await asyncio.to_thread(self._ensure_collection_sync, name, meta)
+
     async def collection_infos(self) -> list[CollectionInfo]:
         infos: list[CollectionInfo] = []
         for name, meta in self._collections.items():
@@ -47,7 +51,7 @@ class QdrantStore:
             except Exception as exc:  # pragma: no cover - probe failures
                 info.status = f"error: {exc}"
             else:
-                result = details.get("result") or {}
+                result = self._collection_result(details)
                 info.points_count = _safe_int(result.get("points_count"))
                 info.indexed_vectors_count = _safe_int(result.get("indexed_vectors_count"))
                 info.status = str(result.get("status") or "unknown")
@@ -114,6 +118,44 @@ class QdrantStore:
         result = client.get_collections()
         return result.collections
 
+    def _ensure_collection_sync(self, collection: str, meta: CollectionConfig) -> None:
+        try:
+            details = self._get_collection(collection)
+        except Exception:
+            self._create_collection(collection, meta)
+            logger.info(
+                "Created Qdrant collection collection=%s vector_size=%s distance=%s vector_name=%s",
+                collection,
+                meta.vector_size,
+                meta.distance,
+                meta.vector_name,
+            )
+            return
+
+        actual = self._extract_vector_shape(details)
+        expected = {
+            "vector_name": meta.vector_name,
+            "vector_size": meta.vector_size,
+            "distance": meta.distance.lower(),
+        }
+        if actual != expected:
+            logger.warning(
+                "Registered collection differs from Qdrant collection=%s expected=%s actual=%s",
+                collection,
+                expected,
+                actual,
+            )
+
+    def _create_collection(self, collection: str, meta: CollectionConfig) -> None:
+        client = self._get_client()
+        models = self._models()
+        vector_params = models.VectorParams(
+            size=meta.vector_size,
+            distance=self._distance_value(meta.distance),
+        )
+        vectors_config = vector_params if meta.vector_name is None else {meta.vector_name: vector_params}
+        client.create_collection(collection_name=collection, vectors_config=vectors_config)
+
     def _get_collection(self, collection: str) -> dict[str, Any]:
         client = self._get_client()
         result = client.get_collection(collection_name=collection)
@@ -177,6 +219,38 @@ class QdrantStore:
             )
 
         return models.Filter(must=self._build_conditions([{ "key": key, "match": value } for key, value in filter_spec.items()]))
+
+    def _distance_value(self, distance: str):
+        models = self._models()
+        name = distance.upper()
+        try:
+            return getattr(models.Distance, name)
+        except AttributeError:
+            raise ValueError(f"Unsupported Qdrant distance: {distance}") from None
+
+    def _extract_vector_shape(self, details: dict[str, Any]) -> dict[str, Any]:
+        result = self._collection_result(details)
+        config = result.get("config") or {}
+        params = config.get("params") or {}
+        vectors = params.get("vectors")
+        if isinstance(vectors, dict) and "size" not in vectors:
+            vector_name, vector_config = next(iter(vectors.items()))
+            return {
+                "vector_name": vector_name,
+                "vector_size": _safe_int(vector_config.get("size")),
+                "distance": str(vector_config.get("distance") or "").lower(),
+            }
+        return {
+            "vector_name": None,
+            "vector_size": _safe_int((vectors or {}).get("size")),
+            "distance": str((vectors or {}).get("distance") or "").lower(),
+        }
+
+    def _collection_result(self, details: dict[str, Any]) -> dict[str, Any]:
+        result = details.get("result")
+        if isinstance(result, dict):
+            return result
+        return details
 
     def _build_conditions(self, conditions: Any) -> list[Any] | None:
         if not conditions:

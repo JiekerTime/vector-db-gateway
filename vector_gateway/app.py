@@ -73,6 +73,10 @@ async def lifespan(_: FastAPI):
     _model_registry = _build_model_registry(_config)
     _embed_backend = LocalEmbeddingBackend(_config.embedding, _model_registry)
     _qdrant = QdrantStore(_config.qdrant, _config.collections)
+    try:
+        await _qdrant.ensure_collections()
+    except Exception:
+        logger.exception("Failed to bootstrap registered collections in Qdrant")
     _embed_batcher = EmbeddingBatcher(
         backend=_embed_backend,
         queue_config=_config.queues,
