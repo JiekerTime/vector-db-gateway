@@ -64,8 +64,8 @@ full_deploy() {
     "
 }
 
-case \"${1:-full}\" in
+case "${1:-full}" in
     hotpatch|hp) hotpatch ;;
     full) full_deploy ;;
-    *) echo \"Usage: $0 [full|hotpatch]\"; exit 1 ;;
+    *) echo "Usage: $0 [full|hotpatch]"; exit 1 ;;
 esac
