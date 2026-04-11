@@ -1,0 +1,24 @@
+{
+  "logical_collection": "decision_memory",
+  "task_id": "mig-decision-memory-v1-to-v2",
+  "phase": "backfill",
+  "partition_key": "created_at_bucket",
+  "partition_values": ["2025-Q4", "2026-Q1"],
+  "window": {
+    "timezone": "Asia/Shanghai",
+    "start": "05:00",
+    "stop_dispatch": "05:55",
+    "pause_at": "06:00"
+  },
+  "attempt": 1,
+  "checkpoint": null,
+  "priority": 40,
+  "next_run_at": "2026-04-12T05:00:00+08:00",
+  "status": "queued",
+  "metadata": {
+    "source_collection": "decision_memory_v1",
+    "target_collection": "decision_memory_v2",
+    "embedding_callback": "/transform/embed",
+    "payload_scope_fields": ["primary_expert_id", "expert_ids", "domain", "meeting_mode"]
+  }
+}

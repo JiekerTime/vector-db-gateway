@@ -60,6 +60,8 @@ class CollectionConfig(BaseModel):
     distance: str = "Cosine"
     owner: str = "default"
     vector_name: str | None = None
+    sparse_vector_name: str | None = None
+    sparse_modifier: str | None = None
     model: str | None = None
     query_model: str | None = None
     write_model: str | None = None
@@ -67,11 +69,28 @@ class CollectionConfig(BaseModel):
     description: str | None = None
 
 
+class LogicalCollectionMigrationConfig(BaseModel):
+    next_target: str | None = None
+    scheduler: str | None = None
+    job_name: str | None = None
+
+
+class LogicalCollectionConfig(BaseModel):
+    read_targets: list[str] = Field(default_factory=list)
+    write_targets: list[str] = Field(default_factory=list)
+    default_query_mode: str = "dense"
+    alias_name: str | None = None
+    query_model: str | None = None
+    write_model: str | None = None
+    migration: LogicalCollectionMigrationConfig = Field(default_factory=LogicalCollectionMigrationConfig)
+
+
 class GatewayConfig(BaseModel):
     port: int = 8526
     api_key: str = "change-me"
     log_level: str = "INFO"
     log_dir: str = "logs"
+    state_dir: str = "state"
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     models: dict[str, EmbeddingModelConfig] = Field(default_factory=dict)
     qdrant: QdrantConfig = Field(default_factory=QdrantConfig)
@@ -80,6 +99,7 @@ class GatewayConfig(BaseModel):
     operation_priority: dict[str, int]
     fairness: FairnessConfig = Field(default_factory=FairnessConfig)
     collections: dict[str, CollectionConfig]
+    logical_collections: dict[str, LogicalCollectionConfig] = Field(default_factory=dict)
 
 
 def load_config(path: str = "config.yaml") -> GatewayConfig:

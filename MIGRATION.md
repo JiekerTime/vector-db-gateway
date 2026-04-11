@@ -56,6 +56,125 @@ Any migration worker that can issue HTTP callback transforms can use this protoc
 6. Verify target counts and samples.
 7. Flip callers to the new collection or alias.
 
+## Logical Collections And Runtime Control
+
+Production callers should use logical collection names such as `knowledge` or `decision_memory`.
+
+The gateway owns:
+
+- logical collection to physical collection routing
+- current `read_target`
+- current `write_targets`
+- migration phase such as `prepare`, `dual_write`, `backfill`, `verify`, `live`, `rollback`
+- a persisted migration event history in SQLite
+
+Migration workers should not infer routing from old task files. They should read the current runtime state from the gateway.
+
+## Partitioned Backfill
+
+Partitioning is a database concern, not a business term.
+
+Examples:
+
+- `knowledge`: `partition_key = expert_id`
+- `decision_memory`: `partition_key = created_at_bucket` or no partitioning
+
+The split dimension is chosen by the migration task, not by the caller. A migration worker can backfill one partition at a time while the gateway keeps the logical collection stable.
+
+## do-mig Responsibilities
+
+`do-mig` should own the migration queue and execution schedule.
+
+Recommended queue payload:
+
+```json
+{
+  "logical_collection": "knowledge",
+  "task_id": "mig-20260411-knowledge-v3",
+  "phase": "backfill",
+  "partition_key": "expert_id",
+  "partition_values": ["karpathy", "lecun"],
+  "window": {
+    "start": "01:00",
+    "stop_dispatch": "01:55",
+    "pause_at": "02:00"
+  },
+  "attempt": 1,
+  "priority": 50
+}
+```
+
+Recommended dispatch rules:
+
+- one queue item should represent one execution slice, not the whole migration
+- a day can contain many windows, for example `01:00-02:00`, `05:00-06:00`, `13:00-14:00`, `21:00-22:00`
+- each window should stop dispatch a few minutes before the hard pause time
+- `do-mig` should enqueue the next slice immediately after the current slice finishes or pauses
+
+Recommended queue fields:
+
+- `logical_collection`
+- `task_id`
+- `phase`
+- `partition_key`
+- `partition_values`
+- `window`
+- `attempt`
+- `checkpoint`
+- `priority`
+- `next_run_at`
+- `status`
+- `last_error`
+
+Suggested daily schedule:
+
+```json
+{
+  "timezone": "Asia/Shanghai",
+  "windows": [
+    {"start": "01:00", "stop_dispatch": "01:55", "pause_at": "02:00"},
+    {"start": "05:00", "stop_dispatch": "05:55", "pause_at": "06:00"},
+    {"start": "13:00", "stop_dispatch": "13:55", "pause_at": "14:00"},
+    {"start": "21:00", "stop_dispatch": "21:55", "pause_at": "22:00"}
+  ]
+}
+```
+
+This keeps migration throughput high without letting backfill occupy the whole day.
+
+Recommended ownership split:
+
+- `vector-db-gateway`: routing truth and migration phase history
+- `db-migrator`: execution engine for copy, transform, verify, pause, and resume
+- `do-mig`: queue, scheduling window, retries, and dispatch policy
+- `n8n`: optional outer scheduler that triggers `do-mig`, not the source of truth
+
+## Resume Semantics
+
+The gateway now persists both the current migration state and an append-only event history.
+
+Each control-plane action can include structured `metadata`, for example:
+
+- `partition_key`
+- `partition_values`
+- `window`
+- `attempt`
+- `checkpoint`
+
+Useful endpoints:
+
+- `GET /collections/logical`
+- `GET /collections/logical/{logical_name}`
+- `GET /collections/logical/{logical_name}/migration/events`
+- `POST /collections/logical/{logical_name}/migration/{action}`
+
+That lets `do-mig` resume safely:
+
+1. read the logical collection runtime state
+2. read recent migration events
+3. compare its own queued task with the last recorded phase and checkpoint
+4. continue with the next partition batch or resume the paused one
+
 ## Agent And CLI Integration
 
 Machine clients can use:

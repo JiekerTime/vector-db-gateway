@@ -2,6 +2,7 @@ port: 8526
 api_key: "change-me"
 log_level: "INFO"
 log_dir: "logs"
+state_dir: "state"
 
 embedding:
   backend: "sentence_transformers"
@@ -22,17 +23,10 @@ models:
     distance: "Cosine"
     normalize_embeddings: true
     device: "auto"
-  multilingual_small:
+  legacy_small:
     backend: "sentence_transformers"
     model_name: "paraphrase-multilingual-MiniLM-L12-v2"
     vector_size: 384
-    distance: "Cosine"
-    normalize_embeddings: true
-    device: "auto"
-  legacy_medium:
-    backend: "sentence_transformers"
-    model_name: "sentence-transformers/all-mpnet-base-v2"
-    vector_size: 768
     distance: "Cosine"
     normalize_embeddings: true
     device: "auto"
@@ -79,7 +73,9 @@ routing_rules:
 operation_priority:
   query: 0
   search: 1
+  retrieve: 1
   count: 1
+  scroll: 1
   upsert: 2
   backfill: 3
 
@@ -89,30 +85,67 @@ fairness:
   reserve_batch_share: 0.10
 
 collections:
-  documents:
+  knowledge_base_v2:
     vector_size: 1024
     distance: "Cosine"
-    owner: "default"
+    owner: "group_portrait"
     model: "default"
     query_model: "default"
     write_model: "default"
-    aliases: ["documents_v1"]
-    description: "General-purpose document collection"
-  memory:
+    aliases: []
+    description: "Legacy dense-only knowledge collection"
+  knowledge_base_v3:
+    vector_size: 1024
+    distance: "Cosine"
+    owner: "group_portrait"
+    vector_name: "dense"
+    sparse_vector_name: "sparse"
+    sparse_modifier: "idf"
+    model: "default"
+    query_model: "default"
+    write_model: "default"
+    aliases: []
+    description: "Hybrid dense+sparse knowledge collection"
+  decision_memory_v1:
     vector_size: 384
     distance: "Cosine"
-    owner: "default"
-    model: "multilingual_small"
-    query_model: "multilingual_small"
-    write_model: "multilingual_small"
-    aliases: ["memory_v1"]
-    description: "Short-form semantic memory collection"
-  archive:
-    vector_size: 768
+    owner: "group_portrait"
+    model: "legacy_small"
+    query_model: "legacy_small"
+    write_model: "legacy_small"
+    aliases: []
+    description: "Legacy decision memory collection"
+  decision_memory_v2:
+    vector_size: 1024
     distance: "Cosine"
-    owner: "default"
-    model: "legacy_medium"
-    query_model: "legacy_medium"
-    write_model: "legacy_medium"
-    aliases: ["archive_v1"]
-    description: "Legacy embedding footprint"
+    owner: "group_portrait"
+    vector_name: "dense"
+    model: "default"
+    query_model: "default"
+    write_model: "default"
+    aliases: []
+    description: "Gateway-managed decision memory collection"
+
+logical_collections:
+  knowledge:
+    read_targets: ["knowledge_base_v2"]
+    write_targets: ["knowledge_base_v2"]
+    default_query_mode: "hybrid"
+    alias_name: "knowledge"
+    query_model: "default"
+    write_model: "default"
+    migration:
+      next_target: "knowledge_base_v3"
+      scheduler: "n8n"
+      job_name: "gp-knowledge-v2-to-v3"
+  decision_memory:
+    read_targets: ["decision_memory_v1"]
+    write_targets: ["decision_memory_v1"]
+    default_query_mode: "dense"
+    alias_name: "decision_memory"
+    query_model: "default"
+    write_model: "default"
+    migration:
+      next_target: "decision_memory_v2"
+      scheduler: "n8n"
+      job_name: "gp-decision-memory-v1-to-v2"

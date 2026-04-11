@@ -1,0 +1,23 @@
+{
+  "logical_collection": "knowledge",
+  "task_id": "mig-knowledge-v2-to-v3",
+  "phase": "backfill",
+  "partition_key": "expert_id",
+  "partition_values": ["karpathy", "lecun"],
+  "window": {
+    "timezone": "Asia/Shanghai",
+    "start": "01:00",
+    "stop_dispatch": "01:55",
+    "pause_at": "02:00"
+  },
+  "attempt": 1,
+  "checkpoint": null,
+  "priority": 50,
+  "next_run_at": "2026-04-12T01:00:00+08:00",
+  "status": "queued",
+  "metadata": {
+    "source_collection": "knowledge_base_v2",
+    "target_collection": "knowledge_base_v3",
+    "query_mode_after_cutover": "hybrid"
+  }
+}

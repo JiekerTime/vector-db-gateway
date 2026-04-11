@@ -80,6 +80,14 @@ List registered embedding models and vector metadata.
 
 Machine-friendly capability discovery for CLI and agent clients.
 
+### `GET /collections/logical`
+
+List logical collections, current routing targets, and recent migration events.
+
+### `GET /collections/logical/{name}/migration/events`
+
+Read append-only migration events for resume-safe orchestration.
+
 ### `GET /queues`
 
 Current queue depths and recent scheduler activity.
@@ -126,6 +134,7 @@ Model registry and collection registry are intentionally decoupled:
 - collections can move to a new embedding model over time
 - migrations can re-embed into a different vector size without changing caller code
 - external migration workers can target `/transform/embed` as a stable callback endpoint
+- migration orchestration can store partition and checkpoint metadata without changing caller code
 
 ## Request model
 

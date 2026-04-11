@@ -63,6 +63,7 @@ class SearchRequest(BaseModel):
     operation: str = "search"
     collection: str
     text: str | None = None
+    query_text: str | None = None
     vector: list[float] | None = None
     model: str | None = None
     device: str | None = None
@@ -70,11 +71,14 @@ class SearchRequest(BaseModel):
     filter: dict[str, Any] | None = None
     with_payload: bool = True
     with_vectors: bool = False
+    search_mode: str = "auto"
 
     @model_validator(mode="after")
     def validate_payload(self) -> "SearchRequest":
         if self.text is None and self.vector is None:
             raise ValueError("One of 'text' or 'vector' is required")
+        if self.query_text is None and self.text is not None:
+            self.query_text = self.text
         return self
 
 
@@ -160,7 +164,7 @@ class UpsertChunksRequest(BaseModel):
 
 class UpsertPoint(BaseModel):
     id: str | int | None = None
-    vector: list[float]
+    vector: list[float] | dict[str, Any]
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -187,6 +191,8 @@ class CollectionInfo(BaseModel):
     distance: str
     owner: str
     vector_name: str | None = None
+    sparse_vector_name: str | None = None
+    sparse_modifier: str | None = None
     model: str | None = None
     query_model: str | None = None
     write_model: str | None = None
@@ -202,6 +208,8 @@ class EnsureCollectionRequest(BaseModel):
     vector_size: int
     distance: str = "Cosine"
     vector_name: str | None = None
+    sparse_vector_name: str | None = None
+    sparse_modifier: str | None = None
     owner: str = "external"
     model: str | None = None
     query_model: str | None = None
@@ -238,6 +246,7 @@ class CapabilitiesResponse(BaseModel):
     queues: list[str]
     models: list[EmbeddingModelInfo]
     collections: list[CollectionInfo]
+    logical_collections: list["LogicalCollectionInfo"] = Field(default_factory=list)
 
 
 class AgentActionRequest(BaseModel):
@@ -261,5 +270,115 @@ class StatusResponse(BaseModel):
     qdrant: dict[str, Any]
     queues: list[QueueSnapshot]
     collections: list[CollectionInfo]
+    logical_collections: list["LogicalCollectionInfo"] = Field(default_factory=list)
     router_rules: int
     metrics: dict[str, Any]
+
+
+class LogicalCollectionMigrationState(BaseModel):
+    state: str
+    next_target: str | None = None
+    rollback_target: str | None = None
+    task_id: str | None = None
+    shadow_read_targets: list[str] = Field(default_factory=list)
+    last_verify_at: str | None = None
+    last_verify_result: str | None = None
+    last_cutover_at: str | None = None
+    note: str | None = None
+    updated_at: str | None = None
+    recent_events: list["MigrationEvent"] = Field(default_factory=list)
+
+
+class LogicalCollectionInfo(BaseModel):
+    name: str
+    alias_name: str | None = None
+    default_query_mode: str = "dense"
+    configured_read_targets: list[str] = Field(default_factory=list)
+    configured_write_targets: list[str] = Field(default_factory=list)
+    current_read_target: str | None = None
+    current_write_targets: list[str] = Field(default_factory=list)
+    read_collection: CollectionInfo | None = None
+    write_collections: list[CollectionInfo] = Field(default_factory=list)
+    migration: LogicalCollectionMigrationState
+
+
+class MigrationActionRequest(BaseModel):
+    task_id: str | None = None
+    verify_result: str | None = None
+    note: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MigrationEvent(BaseModel):
+    id: int
+    logical_name: str
+    event: str
+    state: str
+    task_id: str | None = None
+    note: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+
+
+class RetrieveRequest(BaseModel):
+    caller: str = "interactive/default"
+    operation: str = "retrieve"
+    collection: str
+    ids: list[str | int]
+    with_payload: bool = True
+    with_vectors: bool = False
+
+
+class RetrievePoint(BaseModel):
+    id: str
+    payload: dict[str, Any] | None = None
+    vector: list[float] | dict[str, Any] | None = None
+
+
+class RetrieveResponse(BaseModel):
+    request_id: str
+    queue: str
+    collection: str
+    points: list[RetrievePoint]
+    latency_ms: int
+    queue_wait_ms: int
+
+
+class PayloadSetRequest(BaseModel):
+    caller: str = "batch/default"
+    operation: str = "upsert"
+    collection: str
+    ids: list[str | int]
+    payload: dict[str, Any]
+    wait: bool = True
+
+
+class PayloadPatchRequest(BaseModel):
+    caller: str = "batch/default"
+    operation: str = "upsert"
+    collection: str
+    id: str | int
+    payload: dict[str, Any]
+    wait: bool = True
+
+
+class PayloadUpdateResponse(BaseModel):
+    request_id: str
+    queue: str
+    collection: str
+    updated: int
+    latency_ms: int
+    queue_wait_ms: int
+
+
+class TransformSparseRequest(BaseModel):
+    texts: list[str]
+
+
+class SparseVectorPayload(BaseModel):
+    indices: list[int]
+    values: list[float]
+
+
+class TransformSparseResponse(BaseModel):
+    vectors: list[SparseVectorPayload]

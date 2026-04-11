@@ -13,9 +13,12 @@ from fastapi.responses import PlainTextResponse
 from vector_gateway.backends import LocalEmbeddingBackend, QdrantStore
 from vector_gateway.config import CollectionConfig, EmbeddingModelConfig, GatewayConfig, load_config
 from vector_gateway.core.batching import EmbeddingBatcher
+from vector_gateway.core.logical_registry import LogicalCollectionRegistry
 from vector_gateway.core.metrics import MetricsStore
 from vector_gateway.core.router import Router
 from vector_gateway.core.scheduler import FairSelector, JobScheduler
+from vector_gateway.core.sparse import sparse_terms
+from vector_gateway.core.state_store import MigrationStateStore
 from vector_gateway.models import (
     AgentActionRequest,
     CapabilitiesResponse,
@@ -23,19 +26,30 @@ from vector_gateway.models import (
     CollectionInfo,
     CountRequest,
     CountResponse,
-    EmbeddingModelInfo,
     EmbedRequest,
     EmbedResponse,
+    EmbeddingModelInfo,
     EnsureCollectionRequest,
     EnsureCollectionResponse,
+    LogicalCollectionInfo,
+    MigrationActionRequest,
+    MigrationEvent,
+    PayloadPatchRequest,
+    PayloadSetRequest,
+    PayloadUpdateResponse,
     QueueSnapshot,
+    RetrieveRequest,
+    RetrieveResponse,
     ScrollRequest,
     ScrollResponse,
     SearchRequest,
     SearchResponse,
+    SparseVectorPayload,
     StatusResponse,
     TransformEmbedRequest,
     TransformEmbedResponse,
+    TransformSparseRequest,
+    TransformSparseResponse,
     UpsertChunk,
     UpsertChunksRequest,
     UpsertPoint,
@@ -52,6 +66,8 @@ _embed_batcher: EmbeddingBatcher
 _job_scheduler: JobScheduler
 _qdrant: QdrantStore
 _model_registry: dict[str, EmbeddingModelConfig]
+_state_store: MigrationStateStore
+_logical_registry: LogicalCollectionRegistry
 _started_at: float = 0.0
 
 logging.basicConfig(
@@ -66,6 +82,7 @@ logger = logging.getLogger("vector-gateway")
 async def lifespan(_: FastAPI):
     global _config, _router, _metrics, _selector
     global _embed_backend, _embed_batcher, _job_scheduler, _qdrant, _model_registry, _started_at
+    global _state_store, _logical_registry
 
     _started_at = time.monotonic()
     _config = load_config()
@@ -77,8 +94,13 @@ async def lifespan(_: FastAPI):
     _model_registry = _build_model_registry(_config)
     _embed_backend = LocalEmbeddingBackend(_config.embedding, _model_registry)
     _qdrant = QdrantStore(_config.qdrant, _config.collections)
+    _state_store = MigrationStateStore(_config.state_dir)
+    _logical_registry = LogicalCollectionRegistry(_config, _state_store)
+
     try:
         await _qdrant.ensure_collections()
+        _logical_registry.bootstrap()
+        await _sync_aliases()
     except Exception:
         logger.exception("Failed to bootstrap registered collections in Qdrant")
     try:
@@ -99,11 +121,13 @@ async def lifespan(_: FastAPI):
     await _job_scheduler.start()
 
     logger.info(
-        "vector-db-gateway started port=%s queues=%s collections=%d rules=%d",
+        "vector-db-gateway started port=%s queues=%s collections=%d logical_collections=%d rules=%d state_db=%s",
         _config.port,
         sorted(_config.queues.keys()),
         len(_config.collections),
+        len(_config.logical_collections),
         _router.rule_count,
+        _state_store.db_path,
     )
     yield
     await _embed_batcher.stop()
@@ -111,7 +135,7 @@ async def lifespan(_: FastAPI):
     logger.info("vector-db-gateway stopped")
 
 
-app = FastAPI(title="vector-db-gateway", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="vector-db-gateway", version="0.2.0", lifespan=lifespan)
 
 
 def _check_api_key(x_api_key: str = Header(default="")) -> None:
@@ -134,16 +158,18 @@ async def health():
 async def status(x_api_key: str = Header(default="")):
     _check_api_key(x_api_key)
     queue_states = await _queue_snapshots()
-    collections = await _qdrant.collection_infos()
+    physical_infos = await _physical_info_map()
     qdrant_status = await _qdrant.health()
     status_label = "ok" if qdrant_status.get("status") == "ok" else "degraded"
+    qdrant_status["migration_state_db"] = str(_state_store.db_path)
     return StatusResponse(
         status=status_label,
         uptime_s=int(time.monotonic() - _started_at),
         embedding_backend=_embed_backend.status(),
         qdrant=qdrant_status,
         queues=queue_states,
-        collections=collections,
+        collections=list(physical_infos.values()),
+        logical_collections=_logical_registry.list_infos(physical_infos),
         router_rules=_router.rule_count,
         metrics=_metrics.snapshot(),
     )
@@ -158,13 +184,79 @@ async def queues(x_api_key: str = Header(default="")):
 @app.get("/collections", response_model=list[CollectionInfo])
 async def collections(x_api_key: str = Header(default="")):
     _check_api_key(x_api_key)
-    return await _qdrant.collection_infos()
+    return list((await _physical_info_map()).values())
 
 
 @app.get("/collections/live", response_model=list[CollectionInfo])
 async def live_collections(x_api_key: str = Header(default="")):
     _check_api_key(x_api_key)
     return await _qdrant.live_collection_infos()
+
+
+@app.get("/collections/logical", response_model=list[LogicalCollectionInfo])
+async def logical_collections(x_api_key: str = Header(default="")):
+    _check_api_key(x_api_key)
+    return _logical_registry.list_infos(await _physical_info_map())
+
+
+@app.get("/collections/logical/{logical_name}", response_model=LogicalCollectionInfo)
+async def logical_collection(logical_name: str, x_api_key: str = Header(default="")):
+    _check_api_key(x_api_key)
+    return await _logical_info(logical_name)
+
+
+@app.get("/collections/logical/{logical_name}/migration/events", response_model=list[MigrationEvent])
+async def logical_migration_events(logical_name: str, limit: int = 20, x_api_key: str = Header(default="")):
+    _check_api_key(x_api_key)
+    try:
+        _logical_registry.get_logical_config(logical_name)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _logical_registry.list_events(logical_name, limit=max(1, min(limit, 200)))
+
+
+@app.post("/collections/logical/{logical_name}/migration/{action}", response_model=LogicalCollectionInfo)
+async def logical_migration_action(
+    logical_name: str,
+    action: str,
+    request: MigrationActionRequest | None = None,
+    x_api_key: str = Header(default=""),
+):
+    _check_api_key(x_api_key)
+    request = request or MigrationActionRequest()
+    try:
+        _logical_registry.get_logical_config(logical_name)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    try:
+        if action == "prepare":
+            await _ensure_next_target(logical_name)
+            _logical_registry.prepare(logical_name, task_id=request.task_id, note=request.note, metadata=request.metadata)
+        elif action == "dual-write":
+            await _ensure_next_target(logical_name)
+            _logical_registry.dual_write(logical_name, task_id=request.task_id, note=request.note, metadata=request.metadata)
+        elif action == "backfill":
+            _logical_registry.backfill(logical_name, task_id=request.task_id, note=request.note, metadata=request.metadata)
+        elif action == "verify":
+            _logical_registry.mark_verify(
+                logical_name,
+                result=request.verify_result,
+                note=request.note,
+                metadata=request.metadata,
+            )
+        elif action == "cutover":
+            _logical_registry.cutover(logical_name, note=request.note, metadata=request.metadata)
+            await _sync_alias(logical_name)
+        elif action == "rollback":
+            _logical_registry.rollback(logical_name, note=request.note, metadata=request.metadata)
+            await _sync_alias(logical_name)
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported migration action: {action}")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await _logical_info(logical_name)
 
 
 @app.post("/collections/ensure", response_model=EnsureCollectionResponse)
@@ -177,6 +269,8 @@ async def ensure_collection(request: EnsureCollectionRequest, x_api_key: str = H
             distance=request.distance,
             owner=request.owner,
             vector_name=request.vector_name,
+            sparse_vector_name=request.sparse_vector_name,
+            sparse_modifier=request.sparse_modifier,
             model=request.model,
             query_model=request.query_model,
             write_model=request.write_model,
@@ -196,24 +290,31 @@ async def models(x_api_key: str = Header(default="")):
 @app.get("/capabilities", response_model=CapabilitiesResponse)
 async def capabilities(x_api_key: str = Header(default="")):
     _check_api_key(x_api_key)
+    physical_infos = await _physical_info_map()
     return CapabilitiesResponse(
         service="vector-db-gateway",
-        version="0.1.0",
+        version="0.2.0",
         actions=[
             CapabilityAction(name="embed", endpoint="/embed", description="Generate dense embeddings"),
-            CapabilityAction(name="transform_embed", endpoint="/transform/embed", description="Migration-safe embedding callback"),
-            CapabilityAction(name="search", endpoint="/search", description="Search a collection"),
+            CapabilityAction(name="transform_embed", endpoint="/transform/embed", description="Migration-safe dense embedding callback"),
+            CapabilityAction(name="transform_bm25_sparse", endpoint="/transform/bm25_sparse", description="Generate sparse lexical vectors"),
+            CapabilityAction(name="search", endpoint="/search", description="Search a physical or logical collection"),
+            CapabilityAction(name="retrieve", endpoint="/retrieve", description="Retrieve points by id"),
             CapabilityAction(name="scroll", endpoint="/scroll", description="Scroll records from a collection"),
             CapabilityAction(name="live_collections", endpoint="/collections/live", description="List live collections discovered from Qdrant"),
+            CapabilityAction(name="logical_collections", endpoint="/collections/logical", description="List logical collection routes and migration state"),
             CapabilityAction(name="count", endpoint="/count", description="Count records in a collection"),
             CapabilityAction(name="ensure_collection", endpoint="/collections/ensure", description="Create or validate a collection for vector writes"),
+            CapabilityAction(name="set_payload", endpoint="/payload/set", description="Set payload fields for many points"),
+            CapabilityAction(name="patch_payload", endpoint="/payload/patch", description="Patch payload fields for a point"),
             CapabilityAction(name="upsert_chunks", endpoint="/upsert/chunks", description="Upsert chunks with optional embedding"),
             CapabilityAction(name="upsert_points", endpoint="/upsert/points", description="Upsert points with supplied vectors"),
             CapabilityAction(name="agent_action", endpoint="/agent/action", description="Single action endpoint for machine callers"),
         ],
         queues=sorted(_config.queues.keys()),
         models=_model_infos(),
-        collections=await _qdrant.collection_infos(),
+        collections=list(physical_infos.values()),
+        logical_collections=_logical_registry.list_infos(physical_infos),
     )
 
 
@@ -277,6 +378,17 @@ async def transform_embed(request: TransformEmbedRequest, x_api_key: str = Heade
     )
 
 
+@app.post("/transform/bm25_sparse", response_model=TransformSparseResponse)
+async def transform_bm25_sparse(request: TransformSparseRequest, x_api_key: str = Header(default="")):
+    _check_api_key(x_api_key)
+    return TransformSparseResponse(
+        vectors=[
+            SparseVectorPayload(indices=indices, values=values)
+            for indices, values in (sparse_terms(text) for text in request.texts)
+        ]
+    )
+
+
 @app.post("/search", response_model=SearchResponse)
 async def search(request: SearchRequest, x_api_key: str = Header(default="")):
     _check_api_key(x_api_key)
@@ -284,24 +396,38 @@ async def search(request: SearchRequest, x_api_key: str = Header(default="")):
     route = _router.resolve(request.caller, request.operation)
     device = _resolved_request_device(route.queue_name, request.device)
     started = time.monotonic()
+    physical_collection = _read_collection(request.collection)
+    query_mode = _resolved_query_mode(request.collection, physical_collection, request.search_mode)
     vector = request.vector
     queue_wait_ms = 0
-    if vector is None:
+    if vector is None and query_mode != "sparse":
         model_ref = request.model or _default_model_ref(request.collection, purpose="query")
         embed_result = await _embed_batcher.submit(
             request_id=request_id,
-            texts=[request.text or ""],
+            texts=[request.text or request.query_text or ""],
             route=route,
             model_name=model_ref,
             device=device,
         )
         vector = embed_result.vectors[0]
         queue_wait_ms += embed_result.queue_wait_ms
+    sparse_vector = _search_sparse_vector(
+        request.collection,
+        physical_collection,
+        query_text=request.query_text or request.text,
+        requested_mode=query_mode,
+    )
+    if query_mode == "hybrid" and sparse_vector is None:
+        query_mode = "dense"
+    if query_mode == "hybrid" and vector is None:
+        query_mode = "sparse"
 
     async def run_search():
         return await _qdrant.search(
-            collection=request.collection,
-            vector=vector or [],
+            collection=physical_collection,
+            dense_vector=vector,
+            sparse_vector=sparse_vector,
+            query_mode=query_mode,
             limit=request.limit,
             filter_spec=request.filter,
             with_payload=request.with_payload,
@@ -316,6 +442,7 @@ async def search(request: SearchRequest, x_api_key: str = Header(default="")):
     )
     total_wait_ms = queue_wait_ms + scheduled_wait_ms
     latency_ms = int((time.monotonic() - started) * 1000)
+    _metrics.observe_request("search", latency_ms=latency_ms, queue_wait_ms=total_wait_ms)
     return SearchResponse(
         request_id=request_id,
         queue=route.queue_name,
@@ -332,10 +459,11 @@ async def scroll(request: ScrollRequest, x_api_key: str = Header(default="")):
     request_id = _request_id()
     started = time.monotonic()
     route = _router.resolve(request.caller, request.operation)
+    physical_collection = _read_collection(request.collection)
 
     async def run_scroll():
         return await _qdrant.scroll(
-            collection=request.collection,
+            collection=physical_collection,
             filter_spec=request.filter,
             limit=request.limit,
             with_payload=request.with_payload,
@@ -349,7 +477,42 @@ async def scroll(request: ScrollRequest, x_api_key: str = Header(default="")):
         factory=run_scroll,
     )
     latency_ms = int((time.monotonic() - started) * 1000)
+    _metrics.observe_request("scroll", latency_ms=latency_ms, queue_wait_ms=queue_wait_ms)
     return ScrollResponse(
+        request_id=request_id,
+        queue=route.queue_name,
+        collection=request.collection,
+        points=points,
+        latency_ms=latency_ms,
+        queue_wait_ms=queue_wait_ms,
+    )
+
+
+@app.post("/retrieve", response_model=RetrieveResponse)
+async def retrieve(request: RetrieveRequest, x_api_key: str = Header(default="")):
+    _check_api_key(x_api_key)
+    request_id = _request_id()
+    started = time.monotonic()
+    route = _router.resolve(request.caller, request.operation)
+    physical_collection = _read_collection(request.collection)
+
+    async def run_retrieve():
+        return await _qdrant.retrieve(
+            collection=physical_collection,
+            ids=request.ids,
+            with_payload=request.with_payload,
+            with_vectors=request.with_vectors,
+        )
+
+    points, queue_wait_ms = await _job_scheduler.submit(
+        request_id=request_id,
+        endpoint="retrieve",
+        route=route,
+        factory=run_retrieve,
+    )
+    latency_ms = int((time.monotonic() - started) * 1000)
+    _metrics.observe_request("retrieve", latency_ms=latency_ms, queue_wait_ms=queue_wait_ms)
+    return RetrieveResponse(
         request_id=request_id,
         queue=route.queue_name,
         collection=request.collection,
@@ -365,9 +528,10 @@ async def count(request: CountRequest, x_api_key: str = Header(default="")):
     request_id = _request_id()
     started = time.monotonic()
     route = _router.resolve(request.caller, request.operation)
+    physical_collection = _read_collection(request.collection)
 
     async def run_count():
-        return await _qdrant.count(collection=request.collection, filter_spec=request.filter)
+        return await _qdrant.count(collection=physical_collection, filter_spec=request.filter)
 
     total, queue_wait_ms = await _job_scheduler.submit(
         request_id=request_id,
@@ -376,11 +540,86 @@ async def count(request: CountRequest, x_api_key: str = Header(default="")):
         factory=run_count,
     )
     latency_ms = int((time.monotonic() - started) * 1000)
+    _metrics.observe_request("count", latency_ms=latency_ms, queue_wait_ms=queue_wait_ms)
     return CountResponse(
         request_id=request_id,
         queue=route.queue_name,
         collection=request.collection,
         count=total,
+        latency_ms=latency_ms,
+        queue_wait_ms=queue_wait_ms,
+    )
+
+
+@app.post("/payload/set", response_model=PayloadUpdateResponse)
+async def set_payload(request: PayloadSetRequest, x_api_key: str = Header(default="")):
+    _check_api_key(x_api_key)
+    request_id = _request_id()
+    started = time.monotonic()
+    route = _router.resolve(request.caller, request.operation)
+    write_targets = _write_targets(request.collection)
+
+    async def run_set_payload():
+        updated = 0
+        for target in write_targets:
+            updated = await _qdrant.set_payload(
+                collection=target,
+                ids=request.ids,
+                payload=request.payload,
+                wait=request.wait,
+            )
+        return updated
+
+    updated, queue_wait_ms = await _job_scheduler.submit(
+        request_id=request_id,
+        endpoint="set_payload",
+        route=route,
+        factory=run_set_payload,
+    )
+    latency_ms = int((time.monotonic() - started) * 1000)
+    _metrics.observe_request("set_payload", latency_ms=latency_ms, queue_wait_ms=queue_wait_ms)
+    return PayloadUpdateResponse(
+        request_id=request_id,
+        queue=route.queue_name,
+        collection=request.collection,
+        updated=updated,
+        latency_ms=latency_ms,
+        queue_wait_ms=queue_wait_ms,
+    )
+
+
+@app.post("/payload/patch", response_model=PayloadUpdateResponse)
+async def patch_payload(request: PayloadPatchRequest, x_api_key: str = Header(default="")):
+    _check_api_key(x_api_key)
+    request_id = _request_id()
+    started = time.monotonic()
+    route = _router.resolve(request.caller, request.operation)
+    write_targets = _write_targets(request.collection)
+
+    async def run_patch_payload():
+        updated = 0
+        for target in write_targets:
+            updated = await _qdrant.patch_payload(
+                collection=target,
+                point_id=request.id,
+                payload=request.payload,
+                wait=request.wait,
+            )
+        return updated
+
+    updated, queue_wait_ms = await _job_scheduler.submit(
+        request_id=request_id,
+        endpoint="patch_payload",
+        route=route,
+        factory=run_patch_payload,
+    )
+    latency_ms = int((time.monotonic() - started) * 1000)
+    _metrics.observe_request("patch_payload", latency_ms=latency_ms, queue_wait_ms=queue_wait_ms)
+    return PayloadUpdateResponse(
+        request_id=request_id,
+        queue=route.queue_name,
+        collection=request.collection,
+        updated=updated,
         latency_ms=latency_ms,
         queue_wait_ms=queue_wait_ms,
     )
@@ -395,19 +634,24 @@ async def upsert_chunks(request: UpsertChunksRequest, x_api_key: str = Header(de
     device = _resolved_request_device(route.queue_name, request.device)
 
     points, embed_wait_ms = await _prepare_upsert_points(
+        request.collection,
         request.chunks,
         route,
         request.model,
         device,
         request_id,
     )
+    write_targets = _write_targets(request.collection)
 
     async def run_upsert():
-        return await _qdrant.upsert_points(
-            collection=request.collection,
-            points=points,
-            wait=request.wait,
-        )
+        upserted = 0
+        for target in write_targets:
+            upserted = await _qdrant.upsert_points(
+                collection=target,
+                points=points,
+                wait=request.wait,
+            )
+        return upserted
 
     upserted, scheduled_wait_ms = await _job_scheduler.submit(
         request_id=request_id,
@@ -416,13 +660,15 @@ async def upsert_chunks(request: UpsertChunksRequest, x_api_key: str = Header(de
         factory=run_upsert,
     )
     latency_ms = int((time.monotonic() - started) * 1000)
+    total_wait_ms = embed_wait_ms + scheduled_wait_ms
+    _metrics.observe_request("upsert_chunks", latency_ms=latency_ms, queue_wait_ms=total_wait_ms)
     return UpsertResponse(
         request_id=request_id,
         queue=route.queue_name,
         collection=request.collection,
         upserted=upserted,
         latency_ms=latency_ms,
-        queue_wait_ms=embed_wait_ms + scheduled_wait_ms,
+        queue_wait_ms=total_wait_ms,
     )
 
 
@@ -433,13 +679,17 @@ async def upsert_points(request: UpsertPointsRequest, x_api_key: str = Header(de
     started = time.monotonic()
     route = _router.resolve(request.caller, request.operation)
     points = [UpsertPoint(id=point.id, vector=point.vector, payload=point.payload) for point in request.points]
+    write_targets = _write_targets(request.collection)
 
     async def run_upsert():
-        return await _qdrant.upsert_points(
-            collection=request.collection,
-            points=points,
-            wait=request.wait,
-        )
+        upserted = 0
+        for target in write_targets:
+            upserted = await _qdrant.upsert_points(
+                collection=target,
+                points=points,
+                wait=request.wait,
+            )
+        return upserted
 
     upserted, queue_wait_ms = await _job_scheduler.submit(
         request_id=request_id,
@@ -448,6 +698,7 @@ async def upsert_points(request: UpsertPointsRequest, x_api_key: str = Header(de
         factory=run_upsert,
     )
     latency_ms = int((time.monotonic() - started) * 1000)
+    _metrics.observe_request("upsert_points", latency_ms=latency_ms, queue_wait_ms=queue_wait_ms)
     return UpsertResponse(
         request_id=request_id,
         queue=route.queue_name,
@@ -465,14 +716,22 @@ async def agent_action(request: AgentActionRequest, x_api_key: str = Header(defa
         return await embed(EmbedRequest.model_validate(request.payload), x_api_key)
     if request.action == "transform_embed":
         return await transform_embed(TransformEmbedRequest.model_validate(request.payload), x_api_key)
+    if request.action == "transform_bm25_sparse":
+        return await transform_bm25_sparse(TransformSparseRequest.model_validate(request.payload), x_api_key)
     if request.action == "search":
         return await search(SearchRequest.model_validate(request.payload), x_api_key)
+    if request.action == "retrieve":
+        return await retrieve(RetrieveRequest.model_validate(request.payload), x_api_key)
     if request.action == "scroll":
         return await scroll(ScrollRequest.model_validate(request.payload), x_api_key)
     if request.action == "count":
         return await count(CountRequest.model_validate(request.payload), x_api_key)
     if request.action == "ensure_collection":
         return await ensure_collection(EnsureCollectionRequest.model_validate(request.payload), x_api_key)
+    if request.action == "set_payload":
+        return await set_payload(PayloadSetRequest.model_validate(request.payload), x_api_key)
+    if request.action == "patch_payload":
+        return await patch_payload(PayloadPatchRequest.model_validate(request.payload), x_api_key)
     if request.action == "upsert_chunks":
         return await upsert_chunks(UpsertChunksRequest.model_validate(request.payload), x_api_key)
     if request.action == "upsert_points":
@@ -481,6 +740,7 @@ async def agent_action(request: AgentActionRequest, x_api_key: str = Header(defa
 
 
 async def _prepare_upsert_points(
+    collection_name: str,
     chunks: list[UpsertChunk],
     route,
     model_name: str | None,
@@ -491,7 +751,7 @@ async def _prepare_upsert_points(
     embed_wait_ms = 0
     embedded_vectors: list[list[float]] = []
     if texts:
-        model_ref = model_name or _default_model_ref(purpose="write")
+        model_ref = model_name or _default_model_ref(collection_name, purpose="write")
         embed_result = await _embed_batcher.submit(
             request_id=request_id,
             texts=texts,
@@ -577,6 +837,9 @@ def _build_model_registry(config: GatewayConfig) -> dict[str, EmbeddingModelConf
 
 def _default_model_ref(collection_name: str | None = None, purpose: str = "query") -> str:
     if collection_name:
+        model_name = _logical_registry.model_for(collection_name, purpose=purpose)
+        if model_name:
+            return model_name
         collection = _config.collections.get(collection_name)
         if collection is not None:
             if purpose == "write" and collection.write_model:
@@ -612,3 +875,92 @@ def _model_infos() -> list[EmbeddingModelInfo]:
         )
         for name, profile in sorted(_model_registry.items())
     ]
+
+
+def _read_collection(collection_name: str) -> str:
+    try:
+        return _logical_registry.read_target(collection_name)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _write_targets(collection_name: str) -> list[str]:
+    try:
+        return _logical_registry.write_targets(collection_name)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _resolved_query_mode(requested_collection: str, physical_collection: str, requested_mode: str) -> str:
+    mode = (requested_mode or "auto").lower()
+    if mode != "auto":
+        return mode
+    if _logical_registry.is_logical(requested_collection):
+        logical = _logical_registry.get_logical_config(requested_collection)
+        return logical.default_query_mode
+    meta = _config.collections.get(physical_collection)
+    if meta and meta.sparse_vector_name:
+        return "hybrid"
+    return "dense"
+
+
+def _search_sparse_vector(
+    requested_collection: str,
+    physical_collection: str,
+    *,
+    query_text: str | None,
+    requested_mode: str,
+) -> dict[str, list[int] | list[float]] | None:
+    mode = (requested_mode or "dense").lower()
+    if mode not in {"hybrid", "sparse"}:
+        return None
+    meta = _config.collections.get(physical_collection)
+    if meta is None or not meta.sparse_vector_name:
+        return None
+    if not query_text or not query_text.strip():
+        return None
+    indices, values = sparse_terms(query_text)
+    if not indices:
+        return None
+    return {"indices": indices, "values": values}
+
+
+async def _physical_info_map() -> dict[str, CollectionInfo]:
+    infos = await _qdrant.collection_infos()
+    return {info.name: info for info in infos}
+
+
+async def _logical_info(logical_name: str) -> LogicalCollectionInfo:
+    try:
+        return _logical_registry.get_info(logical_name, await _physical_info_map())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+async def _ensure_next_target(logical_name: str) -> None:
+    next_target = _logical_registry.ensure_target(logical_name)
+    meta = _config.collections.get(next_target)
+    if meta is None:
+        raise HTTPException(status_code=400, detail=f"Missing configured physical collection: {next_target}")
+    await _qdrant.ensure_collection(collection=next_target, meta=meta)
+
+
+async def _sync_aliases() -> None:
+    for logical_name in _config.logical_collections:
+        await _sync_alias(logical_name)
+
+
+async def _sync_alias(logical_name: str) -> None:
+    logical = _logical_registry.get_logical_config(logical_name)
+    alias_name = logical.alias_name or logical_name
+    if not alias_name:
+        return
+    target = _logical_registry.read_target(logical_name)
+    try:
+        await _qdrant.ensure_alias(alias_name, target)
+    except Exception:
+        logger.exception("Failed to sync alias logical_name=%s alias=%s target=%s", logical_name, alias_name, target)

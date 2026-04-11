@@ -7,7 +7,8 @@ import logging
 from typing import Any
 
 from vector_gateway.config import CollectionConfig, QdrantConfig
-from vector_gateway.models.api import CollectionInfo, ScrollPoint, SearchHit, UpsertPoint
+from vector_gateway.core.sparse import sparse_terms
+from vector_gateway.models.api import CollectionInfo, RetrievePoint, ScrollPoint, SearchHit, UpsertPoint
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,9 @@ class QdrantStore:
     async def ensure_collections(self) -> None:
         for name, meta in self._collections.items():
             await asyncio.to_thread(self._ensure_collection_sync, name, meta)
+
+    async def ensure_alias(self, alias_name: str, collection: str) -> None:
+        await asyncio.to_thread(self._ensure_alias_sync, alias_name, collection)
 
     async def collection_infos(self) -> list[CollectionInfo]:
         infos: list[CollectionInfo] = []
@@ -99,7 +103,9 @@ class QdrantStore:
         self,
         *,
         collection: str,
-        vector: list[float],
+        dense_vector: list[float] | None,
+        sparse_vector: dict[str, list[int] | list[float]] | None,
+        query_mode: str,
         limit: int,
         filter_spec: dict[str, Any] | None,
         with_payload: bool,
@@ -108,10 +114,12 @@ class QdrantStore:
         meta = await asyncio.to_thread(self._collection_meta, collection)
         query_filter = await asyncio.to_thread(self._build_filter, filter_spec)
         raw_hits = await asyncio.to_thread(
-            self._search_sync,
+            self._query_sync,
             collection,
-            meta.vector_name,
-            vector,
+            meta,
+            dense_vector,
+            sparse_vector,
+            query_mode,
             limit,
             query_filter,
             with_payload,
@@ -123,14 +131,7 @@ class QdrantStore:
             score = float(getattr(hit, "score", 0.0))
             payload = getattr(hit, "payload", None)
             item_vector = getattr(hit, "vector", None) if with_vectors else None
-            hits.append(
-                SearchHit(
-                    id=str(hit_id),
-                    score=score,
-                    payload=payload,
-                    vector=item_vector,
-                )
-            )
+            hits.append(SearchHit(id=str(hit_id), score=score, payload=payload, vector=item_vector))
         return hits
 
     async def count(self, *, collection: str, filter_spec: dict[str, Any] | None) -> int:
@@ -166,6 +167,46 @@ class QdrantStore:
             points.append(ScrollPoint(id=str(point_id), payload=payload, vector=item_vector))
         return points
 
+    async def retrieve(
+        self,
+        *,
+        collection: str,
+        ids: list[str | int],
+        with_payload: bool,
+        with_vectors: bool,
+    ) -> list[RetrievePoint]:
+        await asyncio.to_thread(self._collection_meta, collection)
+        raw_points = await asyncio.to_thread(self._retrieve_sync, collection, ids, with_payload, with_vectors)
+        points: list[RetrievePoint] = []
+        for point in raw_points:
+            point_id = getattr(point, "id", None)
+            payload = getattr(point, "payload", None)
+            item_vector = getattr(point, "vector", None) if with_vectors else None
+            points.append(RetrievePoint(id=str(point_id), payload=payload, vector=item_vector))
+        return points
+
+    async def set_payload(
+        self,
+        *,
+        collection: str,
+        ids: list[str | int],
+        payload: dict[str, Any],
+        wait: bool = True,
+    ) -> int:
+        await asyncio.to_thread(self._collection_meta, collection)
+        return await asyncio.to_thread(self._set_payload_sync, collection, ids, payload, wait)
+
+    async def patch_payload(
+        self,
+        *,
+        collection: str,
+        point_id: str | int,
+        payload: dict[str, Any],
+        wait: bool = True,
+    ) -> int:
+        await asyncio.to_thread(self._collection_meta, collection)
+        return await asyncio.to_thread(self._set_payload_sync, collection, [point_id], payload, wait)
+
     async def upsert_points(
         self,
         *,
@@ -184,6 +225,8 @@ class QdrantStore:
             distance=meta.distance,
             owner=meta.owner,
             vector_name=meta.vector_name,
+            sparse_vector_name=meta.sparse_vector_name,
+            sparse_modifier=meta.sparse_modifier,
             model=meta.model,
             query_model=meta.query_model,
             write_model=meta.write_model,
@@ -202,11 +245,12 @@ class QdrantStore:
         except Exception:
             self._create_collection(collection, meta)
             logger.info(
-                "Created Qdrant collection collection=%s vector_size=%s distance=%s vector_name=%s",
+                "Created Qdrant collection collection=%s vector_size=%s distance=%s vector_name=%s sparse_vector_name=%s",
                 collection,
                 meta.vector_size,
                 meta.distance,
                 meta.vector_name,
+                meta.sparse_vector_name,
             )
             return
 
@@ -215,6 +259,7 @@ class QdrantStore:
             "vector_name": meta.vector_name,
             "vector_size": meta.vector_size,
             "distance": meta.distance.lower(),
+            "sparse_vector_name": meta.sparse_vector_name,
         }
         if actual != expected:
             logger.warning(
@@ -224,6 +269,30 @@ class QdrantStore:
                 actual,
             )
 
+    def _ensure_alias_sync(self, alias_name: str, collection: str) -> None:
+        if alias_name == collection:
+            return
+        client = self._get_client()
+        existing_collections = {getattr(item, "name", None) for item in self._client_get_collections()}
+        if alias_name in existing_collections:
+            logger.warning(
+                "Skip alias sync because alias name is already a collection alias=%s target=%s",
+                alias_name,
+                collection,
+            )
+            return
+        models = self._models()
+        delete_op = models.DeleteAliasOperation(
+            delete_alias=models.DeleteAlias(alias_name=alias_name),
+        )
+        create_op = models.CreateAliasOperation(
+            create_alias=models.CreateAlias(collection_name=collection, alias_name=alias_name),
+        )
+        try:
+            client.update_collection_aliases([delete_op, create_op])
+        except Exception:
+            client.update_collection_aliases([create_op])
+
     def _create_collection(self, collection: str, meta: CollectionConfig) -> None:
         client = self._get_client()
         models = self._models()
@@ -232,7 +301,17 @@ class QdrantStore:
             distance=self._distance_value(meta.distance),
         )
         vectors_config = vector_params if meta.vector_name is None else {meta.vector_name: vector_params}
-        client.create_collection(collection_name=collection, vectors_config=vectors_config)
+        sparse_vectors_config = None
+        if meta.sparse_vector_name:
+            sparse_params = models.SparseVectorParams(
+                modifier=self._sparse_modifier_value(meta.sparse_modifier),
+            )
+            sparse_vectors_config = {meta.sparse_vector_name: sparse_params}
+        client.create_collection(
+            collection_name=collection,
+            vectors_config=vectors_config,
+            sparse_vectors_config=sparse_vectors_config,
+        )
 
     def _get_collection(self, collection: str) -> dict[str, Any]:
         client = self._get_client()
@@ -241,19 +320,55 @@ class QdrantStore:
             return result.model_dump()
         return dict(result)
 
-    def _search_sync(
+    def _query_sync(
         self,
         collection: str,
-        vector_name: str | None,
-        vector: list[float],
+        meta: CollectionConfig,
+        dense_vector: list[float] | None,
+        sparse_vector: dict[str, list[int] | list[float]] | None,
+        query_mode: str,
         limit: int,
         query_filter,
         with_payload: bool,
         with_vectors: bool,
     ):
         client = self._get_client()
+        models = self._models()
+        normalized_mode = (query_mode or "dense").lower()
+        sparse_query = self._sparse_query(models, sparse_vector)
+
+        if normalized_mode == "hybrid" and dense_vector and sparse_query and meta.sparse_vector_name:
+            response = client.query_points(
+                collection_name=collection,
+                prefetch=[
+                    models.Prefetch(query=dense_vector, using=meta.vector_name, limit=limit),
+                    models.Prefetch(query=sparse_query, using=meta.sparse_vector_name, limit=limit),
+                ],
+                query=models.FusionQuery(fusion=models.Fusion.RRF),
+                query_filter=query_filter,
+                limit=limit,
+                with_payload=with_payload,
+                with_vectors=with_vectors,
+            )
+            return getattr(response, "points", response)
+
+        if normalized_mode == "sparse" and sparse_query and meta.sparse_vector_name:
+            response = client.query_points(
+                collection_name=collection,
+                query=sparse_query,
+                using=meta.sparse_vector_name,
+                query_filter=query_filter,
+                limit=limit,
+                with_payload=with_payload,
+                with_vectors=with_vectors,
+            )
+            return getattr(response, "points", response)
+
+        if dense_vector is None:
+            raise ValueError(f"Collection '{collection}' requires a dense vector for query mode '{normalized_mode}'")
+
         if hasattr(client, "search"):
-            query_vector = vector if vector_name is None else (vector_name, vector)
+            query_vector = dense_vector if meta.vector_name is None else (meta.vector_name, dense_vector)
             return client.search(
                 collection_name=collection,
                 query_vector=query_vector,
@@ -265,8 +380,8 @@ class QdrantStore:
 
         response = client.query_points(
             collection_name=collection,
-            query=vector,
-            using=vector_name,
+            query=dense_vector,
+            using=meta.vector_name,
             query_filter=query_filter,
             limit=limit,
             with_payload=with_payload,
@@ -300,13 +415,39 @@ class QdrantStore:
         )
         return points
 
+    def _retrieve_sync(
+        self,
+        collection: str,
+        ids: list[str | int],
+        with_payload: bool,
+        with_vectors: bool,
+    ):
+        client = self._get_client()
+        return client.retrieve(
+            collection_name=collection,
+            ids=ids,
+            with_payload=with_payload,
+            with_vectors=with_vectors,
+        )
+
+    def _set_payload_sync(
+        self,
+        collection: str,
+        ids: list[str | int],
+        payload: dict[str, Any],
+        wait: bool,
+    ) -> int:
+        client = self._get_client()
+        client.set_payload(collection_name=collection, payload=payload, points=ids, wait=wait)
+        return len(ids)
+
     def _upsert_sync(self, collection: str, points: list[UpsertPoint], wait: bool) -> int:
         client = self._get_client()
         models = self._models()
         point_structs = [
             models.PointStruct(
                 id=point.id if point.id is not None else None,
-                vector=self._point_vector(collection, point.vector),
+                vector=self._point_vector(collection, point.vector, point.payload),
                 payload=point.payload,
             )
             for point in points
@@ -326,7 +467,7 @@ class QdrantStore:
                 must_not=self._build_conditions(filter_spec.get("must_not")),
             )
 
-        return models.Filter(must=self._build_conditions([{ "key": key, "match": value } for key, value in filter_spec.items()]))
+        return models.Filter(must=self._build_conditions([{"key": key, "match": value} for key, value in filter_spec.items()]))
 
     def _distance_value(self, distance: str):
         models = self._models()
@@ -336,22 +477,36 @@ class QdrantStore:
         except AttributeError:
             raise ValueError(f"Unsupported Qdrant distance: {distance}") from None
 
+    def _sparse_modifier_value(self, modifier: str | None):
+        if not modifier:
+            return None
+        models = self._models()
+        name = modifier.upper()
+        try:
+            return getattr(models.Modifier, name)
+        except AttributeError:
+            raise ValueError(f"Unsupported Qdrant sparse modifier: {modifier}") from None
+
     def _extract_vector_shape(self, details: dict[str, Any]) -> dict[str, Any]:
         result = self._collection_result(details)
         config = result.get("config") or {}
         params = config.get("params") or {}
         vectors = params.get("vectors")
+        sparse_vectors = params.get("sparse_vectors")
+        sparse_vector_name = next(iter(sparse_vectors.keys()), None) if isinstance(sparse_vectors, dict) else None
         if isinstance(vectors, dict) and "size" not in vectors:
             vector_name, vector_config = next(iter(vectors.items()))
             return {
                 "vector_name": vector_name,
                 "vector_size": _safe_int(vector_config.get("size")),
                 "distance": str(vector_config.get("distance") or "").lower(),
+                "sparse_vector_name": sparse_vector_name,
             }
         return {
             "vector_name": None,
             "vector_size": _safe_int((vectors or {}).get("size")),
             "distance": str((vectors or {}).get("distance") or "").lower(),
+            "sparse_vector_name": sparse_vector_name,
         }
 
     def _collection_result(self, details: dict[str, Any]) -> dict[str, Any]:
@@ -411,13 +566,50 @@ class QdrantStore:
             distance=str(shape.get("distance") or "Cosine"),
             owner="external",
             vector_name=shape.get("vector_name"),
+            sparse_vector_name=shape.get("sparse_vector_name"),
         )
 
-    def _point_vector(self, collection: str, vector: list[float]) -> Any:
+    def _point_vector(self, collection: str, vector: list[float] | dict[str, Any], payload: dict[str, Any]) -> Any:
         meta = self._collection_meta(collection)
-        if meta.vector_name:
-            return {meta.vector_name: vector}
+        if isinstance(vector, dict):
+            built = dict(vector)
+            if meta.sparse_vector_name and meta.sparse_vector_name not in built:
+                sparse = self._sparse_vector_from_payload(payload)
+                if sparse is not None:
+                    built[meta.sparse_vector_name] = sparse
+            if meta.vector_name is None and len(built) == 1 and meta.sparse_vector_name not in built:
+                return next(iter(built.values()))
+            return built
+
+        if meta.vector_name or meta.sparse_vector_name:
+            built: dict[str, Any] = {}
+            dense_name = meta.vector_name or "dense"
+            built[dense_name] = vector
+            if meta.sparse_vector_name:
+                sparse = self._sparse_vector_from_payload(payload)
+                if sparse is not None:
+                    built[meta.sparse_vector_name] = sparse
+            return built
         return vector
+
+    def _sparse_vector_from_payload(self, payload: dict[str, Any]) -> Any | None:
+        text = payload.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return None
+        indices, values = sparse_terms(text)
+        if not indices:
+            return None
+        models = self._models()
+        return models.SparseVector(indices=indices, values=values)
+
+    def _sparse_query(self, models, sparse_vector: dict[str, list[int] | list[float]] | None):
+        if not sparse_vector:
+            return None
+        indices = sparse_vector.get("indices") or []
+        values = sparse_vector.get("values") or []
+        if not indices:
+            return None
+        return models.SparseVector(indices=indices, values=values)
 
     def _models(self):
         try:

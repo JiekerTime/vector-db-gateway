@@ -41,7 +41,7 @@ hotpatch() {
 
 full_deploy() {
     echo "==> Full deploy vector-db-gateway"
-    $SSH_CMD "mkdir -p $REMOTE_BUILD_DIR $DATA_DIR/logs $DATA_DIR/cache"
+    $SSH_CMD "mkdir -p $REMOTE_BUILD_DIR $DATA_DIR/logs $DATA_DIR/cache $DATA_DIR/state"
     rsync -avz --delete \
         -e "$RSYNC_SSH" \
         --exclude '.git' \
@@ -68,6 +68,7 @@ full_deploy() {
             --network $NETWORK \
             -p $PORT:8526 \
             -v $DATA_DIR/logs:/app/logs \
+            -v $DATA_DIR/state:/app/state \
             -v $DATA_DIR/cache:/root/.cache/huggingface \
             $IMAGE
     "
