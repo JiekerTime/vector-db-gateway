@@ -6,14 +6,14 @@
   "partition_values": ["karpathy", "lecun"],
   "window": {
     "timezone": "Asia/Shanghai",
-    "start": "01:00",
-    "stop_dispatch": "01:55",
-    "pause_at": "02:00"
+    "start": "00:30",
+    "stop_dispatch": "01:05",
+    "pause_at": "01:10"
   },
   "attempt": 1,
   "checkpoint": null,
   "priority": 50,
-  "next_run_at": "2026-04-12T01:00:00+08:00",
+  "next_run_at": "2026-04-12T00:30:00+08:00",
   "status": "queued",
   "metadata": {
     "source_collection": "knowledge_base_v2",

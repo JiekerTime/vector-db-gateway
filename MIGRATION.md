@@ -126,21 +126,21 @@ Recommended queue fields:
 - `status`
 - `last_error`
 
-Suggested daily schedule:
+Suggested low-impact schedule:
 
 ```json
 {
   "timezone": "Asia/Shanghai",
   "windows": [
-    {"start": "01:00", "stop_dispatch": "01:55", "pause_at": "02:00"},
-    {"start": "05:00", "stop_dispatch": "05:55", "pause_at": "06:00"},
-    {"start": "13:00", "stop_dispatch": "13:55", "pause_at": "14:00"},
-    {"start": "21:00", "stop_dispatch": "21:55", "pause_at": "22:00"}
+    {"start": "00:30", "stop_dispatch": "01:05", "pause_at": "01:10"},
+    {"start": "02:30", "stop_dispatch": "03:05", "pause_at": "03:10"},
+    {"start": "04:30", "stop_dispatch": "05:05", "pause_at": "05:10"},
+    {"start": "06:30", "stop_dispatch": "07:05", "pause_at": "07:10"}
   ]
 }
 ```
 
-This keeps migration throughput high without letting backfill occupy the whole day.
+This keeps migration throughput high while avoiding the main daytime traffic window.
 
 Recommended ownership split:
 
