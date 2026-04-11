@@ -38,6 +38,7 @@ Key properties:
 - independent service, not a library hidden inside another application
 - caller-agnostic request model
 - separate queue policies for `realtime`, `interactive`, and `batch`
+- selectable embedding devices (`cpu`, `cuda`, `auto`)
 - online requests can preempt low-priority work
 - low-priority work has anti-starvation protection
 
@@ -112,6 +113,14 @@ Main sections:
 
 All collection metadata is centralized in config. Callers do not need to know vector size or distance settings.
 
+Queue configuration can also steer the default embedding device:
+
+- `realtime` can prefer `cuda`
+- `interactive` can prefer `auto`
+- `batch` can prefer `cpu`
+
+Request payloads can still override this with `device`.
+
 Model registry and collection registry are intentionally decoupled:
 
 - collections can move to a new embedding model over time
@@ -178,7 +187,8 @@ curl http://localhost:8526/embed \
   -d '{
     "caller": "realtime/demo",
     "operation": "query",
-    "texts": ["hello vector gateway"]
+    "texts": ["hello vector gateway"],
+    "device": "cpu"
   }'
 ```
 
@@ -204,8 +214,19 @@ curl http://localhost:8526/transform/embed \
   -H "X-API-Key: change-me" \
   -d '{
     "texts": ["chunk one", "chunk two"],
-    "model": "default"
+    "model": "default",
+    "device": "auto"
   }'
+```
+
+## Deployment device modes
+
+Default deployment exposes GPUs to the container and lets runtime policy choose devices.
+
+CPU-only deployment:
+
+```bash
+VECTOR_GATEWAY_GPU_MODE=off ./deploy.sh
 ```
 
 ## Project layout

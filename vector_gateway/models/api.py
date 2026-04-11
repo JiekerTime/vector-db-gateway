@@ -208,6 +208,7 @@ class QueueSnapshot(BaseModel):
     pending_texts: int
     max_batch_size: int
     max_wait_ms: int
+    preferred_device: str | None = None
 
 
 class StatusResponse(BaseModel):

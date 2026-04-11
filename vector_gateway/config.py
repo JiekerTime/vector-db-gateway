@@ -35,6 +35,7 @@ class QueueConfig(BaseModel):
     max_batch_size: int = 8
     max_wait_ms: int = 15
     max_concurrent_jobs: int = 1
+    preferred_device: str | None = None
 
 
 class RoutingRule(BaseModel):

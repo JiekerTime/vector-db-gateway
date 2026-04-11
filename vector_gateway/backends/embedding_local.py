@@ -135,10 +135,23 @@ class LocalEmbeddingBackend:
                 ) from exc
 
             logger.info("Loading embedding model: %s device=%s", profile.model_name, profile.device)
-            model = SentenceTransformer(
-                profile.model_name,
-                device=profile.device or self._config.device,
-            )
+            try:
+                model = SentenceTransformer(
+                    profile.model_name,
+                    device=profile.device or self._config.device,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Primary model load failed for %s on %s, retrying with local cache only: %s",
+                    profile.model_name,
+                    profile.device,
+                    exc,
+                )
+                model = SentenceTransformer(
+                    profile.model_name,
+                    device=profile.device or self._config.device,
+                    local_files_only=True,
+                )
             self._models[profile_name] = model
             self._model_devices[profile_name] = profile.device or self._config.device
             return model

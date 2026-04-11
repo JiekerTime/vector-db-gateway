@@ -190,17 +190,18 @@ async def embed(request: EmbedRequest, x_api_key: str = Header(default="")):
     request_id = _request_id()
     started = time.monotonic()
     route = _router.resolve(request.caller, request.operation)
+    device = _resolved_request_device(route.queue_name, request.device)
     model_ref = request.model or _default_model_ref(request.collection_hint, purpose="query")
     result = await _embed_batcher.submit(
         request_id=request_id,
         texts=request.text_items(),
         route=route,
         model_name=model_ref,
-        device=request.device,
+        device=device,
     )
     latency_ms = int((time.monotonic() - started) * 1000)
     _metrics.observe_request("embed", latency_ms=latency_ms, queue_wait_ms=result.queue_wait_ms)
-    _, profile = _embed_backend.resolve_profile(model_ref, request.device)
+    _, profile = _embed_backend.resolve_profile(model_ref, device)
     return EmbedResponse(
         request_id=request_id,
         queue=route.queue_name,
@@ -217,15 +218,16 @@ async def embed(request: EmbedRequest, x_api_key: str = Header(default="")):
 async def transform_embed(request: TransformEmbedRequest, x_api_key: str = Header(default="")):
     _check_api_key(x_api_key)
     route = _router.resolve(request.caller, request.operation)
+    device = _resolved_request_device(route.queue_name, request.device)
     model_ref = request.model or _default_model_ref(purpose="write")
     result = await _embed_batcher.submit(
         request_id=_request_id(),
         texts=request.texts,
         route=route,
         model_name=model_ref,
-        device=request.device,
+        device=device,
     )
-    _, profile = _embed_backend.resolve_profile(model_ref, request.device)
+    _, profile = _embed_backend.resolve_profile(model_ref, device)
     return TransformEmbedResponse(
         model=model_ref,
         model_name=profile.model_name,
@@ -240,6 +242,7 @@ async def search(request: SearchRequest, x_api_key: str = Header(default="")):
     _check_api_key(x_api_key)
     request_id = _request_id()
     route = _router.resolve(request.caller, request.operation)
+    device = _resolved_request_device(route.queue_name, request.device)
     started = time.monotonic()
     vector = request.vector
     queue_wait_ms = 0
@@ -250,7 +253,7 @@ async def search(request: SearchRequest, x_api_key: str = Header(default="")):
             texts=[request.text or ""],
             route=route,
             model_name=model_ref,
-            device=request.device,
+            device=device,
         )
         vector = embed_result.vectors[0]
         queue_wait_ms += embed_result.queue_wait_ms
@@ -316,12 +319,13 @@ async def upsert_chunks(request: UpsertChunksRequest, x_api_key: str = Header(de
     request_id = _request_id()
     started = time.monotonic()
     route = _router.resolve(request.caller, request.operation)
+    device = _resolved_request_device(route.queue_name, request.device)
 
     points, embed_wait_ms = await _prepare_upsert_points(
         request.chunks,
         route,
         request.model,
-        request.device,
+        device,
         request_id,
     )
 
@@ -455,6 +459,7 @@ async def _queue_snapshots() -> list[QueueSnapshot]:
                 pending_texts=pending_texts,
                 max_batch_size=queue_cfg.max_batch_size,
                 max_wait_ms=queue_cfg.max_wait_ms,
+                preferred_device=queue_cfg.preferred_device,
             )
         )
     return snapshots
@@ -506,6 +511,15 @@ def _default_model_ref(collection_name: str | None = None, purpose: str = "query
     if "default" in _model_registry:
         return "default"
     return next(iter(_model_registry.keys()), _config.embedding.default_model)
+
+
+def _resolved_request_device(queue_name: str, request_device: str | None) -> str | None:
+    if request_device:
+        return request_device
+    queue_cfg = _config.queues.get(queue_name)
+    if queue_cfg and queue_cfg.preferred_device:
+        return queue_cfg.preferred_device
+    return None
 
 
 def _model_infos() -> list[EmbeddingModelInfo]:

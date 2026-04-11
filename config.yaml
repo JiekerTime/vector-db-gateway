@@ -42,14 +42,17 @@ queues:
     max_batch_size: 8
     max_wait_ms: 15
     max_concurrent_jobs: 1
+    preferred_device: "cuda"
   interactive:
     max_batch_size: 32
     max_wait_ms: 50
     max_concurrent_jobs: 1
+    preferred_device: "auto"
   batch:
     max_batch_size: 128
     max_wait_ms: 200
     max_concurrent_jobs: 1
+    preferred_device: "cpu"
 
 routing_rules:
   - caller_pattern: "realtime/*"
