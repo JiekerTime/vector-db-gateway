@@ -10,6 +10,7 @@ PORT=8526
 NETWORK="docker_proxy"
 DATA_DIR="/data/vector_db_gateway"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+GPU_MODE="${VECTOR_GATEWAY_GPU_MODE:-auto}"
 
 SSH_CMD="ssh -i $SSH_KEY $REMOTE"
 RSYNC_SSH="ssh -i $SSH_KEY"
@@ -55,11 +56,15 @@ full_deploy() {
     $SSH_CMD "cd $REMOTE_BUILD_DIR && docker build -t $IMAGE ."
     $SSH_CMD "docker stop $CONTAINER 2>/dev/null || true"
     $SSH_CMD "docker rm $CONTAINER 2>/dev/null || true"
+    gpu_args=""
+    if [[ "$GPU_MODE" != "off" ]]; then
+        gpu_args="--gpus all"
+    fi
     $SSH_CMD "
         docker run -d \
             --name $CONTAINER \
             --restart unless-stopped \
-            --gpus all \
+            $gpu_args \
             --network $NETWORK \
             -p $PORT:8526 \
             -v $DATA_DIR/logs:/app/logs \

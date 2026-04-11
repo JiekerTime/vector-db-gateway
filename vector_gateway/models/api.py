@@ -13,6 +13,7 @@ class EmbedRequest(BaseModel):
     text: str | None = None
     texts: list[str] | None = None
     model: str | None = None
+    device: str | None = None
     collection_hint: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -34,6 +35,7 @@ class EmbedResponse(BaseModel):
     request_id: str
     queue: str
     model: str
+    device: str
     vectors: list[list[float]]
     latency_ms: int
     queue_wait_ms: int
@@ -43,6 +45,7 @@ class EmbedResponse(BaseModel):
 class TransformEmbedRequest(BaseModel):
     texts: list[str]
     model: str | None = None
+    device: str | None = None
     caller: str = "batch/migration"
     operation: str = "backfill"
 
@@ -50,6 +53,7 @@ class TransformEmbedRequest(BaseModel):
 class TransformEmbedResponse(BaseModel):
     model: str
     model_name: str
+    device: str
     vector_size: int | None = None
     vectors: list[list[float]]
 
@@ -61,6 +65,7 @@ class SearchRequest(BaseModel):
     text: str | None = None
     vector: list[float] | None = None
     model: str | None = None
+    device: str | None = None
     limit: int = 5
     filter: dict[str, Any] | None = None
     with_payload: bool = True
@@ -123,6 +128,7 @@ class UpsertChunksRequest(BaseModel):
     operation: str = "upsert"
     collection: str
     model: str | None = None
+    device: str | None = None
     wait: bool = True
     chunks: list[UpsertChunk]
 

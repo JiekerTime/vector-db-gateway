@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 class BatchKey:
     queue_name: str
     model_name: str
+    device: str | None
     service_priority: int
     operation_priority: int
 
@@ -29,6 +30,7 @@ class EmbedTask:
     texts: list[str]
     route: RouteDecision
     model_name: str
+    device: str | None
     created_at: float
     future: asyncio.Future
 
@@ -78,6 +80,7 @@ class EmbeddingBatcher:
         texts: list[str],
         route: RouteDecision,
         model_name: str,
+        device: str | None = None,
     ) -> EmbedBatchResult:
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
@@ -86,12 +89,14 @@ class EmbeddingBatcher:
             texts=texts,
             route=route,
             model_name=model_name,
+            device=device,
             created_at=time.monotonic(),
             future=future,
         )
         key = BatchKey(
             queue_name=route.queue_name,
             model_name=model_name,
+            device=device,
             service_priority=route.service_priority,
             operation_priority=route.operation_priority,
         )
@@ -141,7 +146,11 @@ class EmbeddingBatcher:
             )
             flat_texts = [text for task in batch_tasks for text in task.texts]
             try:
-                vectors = await self._backend.embed_texts(flat_texts, batch_key.model_name)
+                vectors = await self._backend.embed_texts(
+                    flat_texts,
+                    batch_key.model_name,
+                    batch_key.device,
+                )
             except Exception as exc:  # pragma: no cover - exercised by integration
                 for task in batch_tasks:
                     if not task.future.done():

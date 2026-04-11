@@ -196,14 +196,16 @@ async def embed(request: EmbedRequest, x_api_key: str = Header(default="")):
         texts=request.text_items(),
         route=route,
         model_name=model_ref,
+        device=request.device,
     )
     latency_ms = int((time.monotonic() - started) * 1000)
     _metrics.observe_request("embed", latency_ms=latency_ms, queue_wait_ms=result.queue_wait_ms)
-    _, profile = _embed_backend.resolve_profile(model_ref)
+    _, profile = _embed_backend.resolve_profile(model_ref, request.device)
     return EmbedResponse(
         request_id=request_id,
         queue=route.queue_name,
         model=profile.model_name,
+        device=profile.device or _config.embedding.device,
         vectors=result.vectors,
         latency_ms=latency_ms,
         queue_wait_ms=result.queue_wait_ms,
@@ -221,11 +223,13 @@ async def transform_embed(request: TransformEmbedRequest, x_api_key: str = Heade
         texts=request.texts,
         route=route,
         model_name=model_ref,
+        device=request.device,
     )
-    _, profile = _embed_backend.resolve_profile(model_ref)
+    _, profile = _embed_backend.resolve_profile(model_ref, request.device)
     return TransformEmbedResponse(
         model=model_ref,
         model_name=profile.model_name,
+        device=profile.device or _config.embedding.device,
         vector_size=profile.vector_size,
         vectors=result.vectors,
     )
@@ -246,6 +250,7 @@ async def search(request: SearchRequest, x_api_key: str = Header(default="")):
             texts=[request.text or ""],
             route=route,
             model_name=model_ref,
+            device=request.device,
         )
         vector = embed_result.vectors[0]
         queue_wait_ms += embed_result.queue_wait_ms
@@ -312,7 +317,13 @@ async def upsert_chunks(request: UpsertChunksRequest, x_api_key: str = Header(de
     started = time.monotonic()
     route = _router.resolve(request.caller, request.operation)
 
-    points, embed_wait_ms = await _prepare_upsert_points(request.chunks, route, request.model, request_id)
+    points, embed_wait_ms = await _prepare_upsert_points(
+        request.chunks,
+        route,
+        request.model,
+        request.device,
+        request_id,
+    )
 
     async def run_upsert():
         return await _qdrant.upsert_points(
@@ -392,6 +403,7 @@ async def _prepare_upsert_points(
     chunks: list[UpsertChunk],
     route,
     model_name: str | None,
+    device: str | None,
     request_id: str,
 ) -> tuple[list[UpsertPoint], int]:
     texts = [chunk.text for chunk in chunks if chunk.vector is None and chunk.text is not None]
@@ -404,6 +416,7 @@ async def _prepare_upsert_points(
             texts=texts,
             route=route,
             model_name=model_ref,
+            device=device,
         )
         embedded_vectors = embed_result.vectors
         embed_wait_ms = embed_result.queue_wait_ms

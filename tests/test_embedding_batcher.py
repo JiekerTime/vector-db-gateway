@@ -13,10 +13,10 @@ from vector_gateway.config import FairnessConfig
 
 class FakeEmbeddingBackend:
     def __init__(self):
-        self.calls: list[tuple[list[str], str]] = []
+        self.calls: list[tuple[list[str], str, str | None]] = []
 
-    async def embed_texts(self, texts: list[str], model_name: str):
-        self.calls.append((texts, model_name))
+    async def embed_texts(self, texts: list[str], model_name: str, device: str | None = None):
+        self.calls.append((texts, model_name, device))
         await asyncio.sleep(0)
         return [[float(len(text))] for text in texts]
 
@@ -66,6 +66,8 @@ class EmbeddingBatcherTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(self.backend.calls), 1)
         self.assertEqual(self.backend.calls[0][0], ["alpha", "beta"])
+        self.assertEqual(self.backend.calls[0][1], "model-a")
+        self.assertIsNone(self.backend.calls[0][2])
         self.assertEqual(first_result.vectors, [[5.0]])
         self.assertEqual(second_result.vectors, [[4.0]])
 

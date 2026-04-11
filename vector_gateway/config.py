@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 class EmbeddingConfig(BaseModel):
     backend: str = "sentence_transformers"
     default_model: str = "BAAI/bge-m3"
-    device: str = "cuda"
+    device: str = "auto"
     normalize_embeddings: bool = True
     batch_size: int = 64
 
