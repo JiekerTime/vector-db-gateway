@@ -1,0 +1,37 @@
+source:
+  type: qdrant
+  url: http://qdrant:6333
+  collection: documents_v1
+  shard_key: tenant_id
+  batch_size: 200
+
+sink:
+  type: qdrant
+  url: http://qdrant:6333
+  collection: documents_v2
+  create_if_missing: true
+  vectors_config:
+    "":
+      size: 1024
+      distance: Cosine
+      type: dense
+
+transform:
+  callback:
+    - url: http://vector-db-gateway:8526/transform/embed
+      input_field: text
+      output_field: ""
+      batch_size: 32
+      timeout: 60
+      retries: 2
+
+throttle:
+  max_batch_per_second: 5.0
+  adaptive: true
+  health_check:
+    url: http://vector-db-gateway:8526/health
+    max_latency_ms: 500
+
+checkpoint:
+  mode: sqlite
+  interval: 100
