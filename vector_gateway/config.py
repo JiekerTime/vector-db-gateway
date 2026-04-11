@@ -85,6 +85,18 @@ class LogicalCollectionConfig(BaseModel):
     migration: LogicalCollectionMigrationConfig = Field(default_factory=LogicalCollectionMigrationConfig)
 
 
+class ServiceEndpointConfig(BaseModel):
+    url: str
+    api_key: str
+    timeout: int = 20
+
+
+class DoMigConfig(BaseModel):
+    enabled: bool = False
+    queue_channel: str = "migration_queue"
+    batch_limit: int = 200
+
+
 class GatewayConfig(BaseModel):
     port: int = 8526
     api_key: str = "change-me"
@@ -100,6 +112,9 @@ class GatewayConfig(BaseModel):
     fairness: FairnessConfig = Field(default_factory=FairnessConfig)
     collections: dict[str, CollectionConfig]
     logical_collections: dict[str, LogicalCollectionConfig] = Field(default_factory=dict)
+    write_disk: ServiceEndpointConfig | None = None
+    db_migrator: ServiceEndpointConfig | None = None
+    do_mig: DoMigConfig = Field(default_factory=DoMigConfig)
 
 
 def load_config(path: str = "config.yaml") -> GatewayConfig:

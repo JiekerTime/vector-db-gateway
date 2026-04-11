@@ -1,11 +1,67 @@
 {
-  "version": 1,
-  "timezone": "Asia/Shanghai",
   "items": [
     {
       "id": "knowledge-batch-3",
       "logical_collection": "knowledge",
-      "task_file": "/opt/docker/db_migrator_git/tasks/gp_knowledge_v2_to_v3.yaml",
+      "task_config": {
+        "source": {
+          "type": "qdrant",
+          "url": "http://qdrant:6333",
+          "collection": "knowledge_base_v2",
+          "shard_key": "expert_id",
+          "batch_size": 200
+        },
+        "sink": {
+          "type": "qdrant",
+          "url": "http://qdrant:6333",
+          "collection": "knowledge_base_v3",
+          "create_if_missing": true,
+          "vectors_config": {
+            "dense": {
+              "size": 1024,
+              "distance": "Cosine",
+              "type": "dense"
+            },
+            "sparse": {
+              "type": "sparse"
+            }
+          }
+        },
+        "transform": {
+          "builtin": [
+            {
+              "type": "copy_vector",
+              "from": "",
+              "to": "dense"
+            }
+          ],
+          "callback": [
+            {
+              "url": "http://vector-db-gateway:8526/transform/bm25_sparse",
+              "headers": {
+                "X-API-Key": "change-me"
+              },
+              "input_field": "chunk_text",
+              "output_field": "sparse",
+              "batch_size": 64,
+              "timeout": 30,
+              "retries": 2
+            }
+          ]
+        },
+        "throttle": {
+          "max_batch_per_second": 5,
+          "adaptive": true,
+          "health_check": {
+            "url": "http://qdrant:6333/healthz",
+            "max_latency_ms": 500
+          }
+        },
+        "checkpoint": {
+          "mode": "sqlite",
+          "interval": 50
+        }
+      },
       "shards": ["xingyun", "editor"],
       "window": {
         "start": "00:30",
@@ -13,12 +69,71 @@
         "pause_at": "01:10"
       },
       "status": "queued",
+      "sequence": 30,
       "note": "small tail batch"
     },
     {
       "id": "knowledge-batch-4",
       "logical_collection": "knowledge",
-      "task_file": "/opt/docker/db_migrator_git/tasks/gp_knowledge_v2_to_v3.yaml",
+      "task_config": {
+        "source": {
+          "type": "qdrant",
+          "url": "http://qdrant:6333",
+          "collection": "knowledge_base_v2",
+          "shard_key": "expert_id",
+          "batch_size": 200
+        },
+        "sink": {
+          "type": "qdrant",
+          "url": "http://qdrant:6333",
+          "collection": "knowledge_base_v3",
+          "create_if_missing": true,
+          "vectors_config": {
+            "dense": {
+              "size": 1024,
+              "distance": "Cosine",
+              "type": "dense"
+            },
+            "sparse": {
+              "type": "sparse"
+            }
+          }
+        },
+        "transform": {
+          "builtin": [
+            {
+              "type": "copy_vector",
+              "from": "",
+              "to": "dense"
+            }
+          ],
+          "callback": [
+            {
+              "url": "http://vector-db-gateway:8526/transform/bm25_sparse",
+              "headers": {
+                "X-API-Key": "change-me"
+              },
+              "input_field": "chunk_text",
+              "output_field": "sparse",
+              "batch_size": 64,
+              "timeout": 30,
+              "retries": 2
+            }
+          ]
+        },
+        "throttle": {
+          "max_batch_per_second": 5,
+          "adaptive": true,
+          "health_check": {
+            "url": "http://qdrant:6333/healthz",
+            "max_latency_ms": 500
+          }
+        },
+        "checkpoint": {
+          "mode": "sqlite",
+          "interval": 50
+        }
+      },
       "shards": ["fowler", "pavlo"],
       "window": {
         "start": "02:30",
@@ -26,32 +141,147 @@
         "pause_at": "03:10"
       },
       "status": "queued",
+      "sequence": 40,
       "note": "medium overnight batch"
     },
     {
       "id": "decision-memory-legacy",
       "logical_collection": "decision_memory",
-      "task_file": "/app/tasks/gp_decision_memory_v1_to_v2_legacy.yaml",
-      "shards": [],
+      "task_config": {
+        "source": {
+          "type": "qdrant",
+          "url": "http://qdrant:6333",
+          "collection": "decision_memory_v1",
+          "batch_size": 100,
+          "filter": {
+            "must": [
+              {
+                "key": "created_at",
+                "range": {
+                  "lt": "2026-01-01T00:00:00+00:00"
+                }
+              }
+            ]
+          }
+        },
+        "sink": {
+          "type": "qdrant",
+          "url": "http://qdrant:6333",
+          "collection": "decision_memory_v2",
+          "create_if_missing": true,
+          "vectors_config": {
+            "dense": {
+              "size": 1024,
+              "distance": "Cosine",
+              "type": "dense"
+            }
+          }
+        },
+        "transform": {
+          "callback": [
+            {
+              "url": "http://vector-db-gateway:8526/transform/embed",
+              "headers": {
+                "X-API-Key": "change-me"
+              },
+              "input_field": "situation_text",
+              "output_field": "dense",
+              "batch_size": 32,
+              "timeout": 60,
+              "retries": 2
+            }
+          ]
+        },
+        "throttle": {
+          "max_batch_per_second": 2,
+          "adaptive": true,
+          "health_check": {
+            "url": "http://qdrant:6333/healthz",
+            "max_latency_ms": 500
+          }
+        },
+        "checkpoint": {
+          "mode": "sqlite",
+          "interval": 20
+        }
+      },
       "window": {
         "start": "04:30",
         "stop_dispatch": "05:05",
         "pause_at": "05:10"
       },
       "status": "queued",
+      "sequence": 50,
       "note": "legacy created_at bucket"
     },
     {
       "id": "decision-memory-recent",
       "logical_collection": "decision_memory",
-      "task_file": "/app/tasks/gp_decision_memory_v1_to_v2_recent.yaml",
-      "shards": [],
+      "task_config": {
+        "source": {
+          "type": "qdrant",
+          "url": "http://qdrant:6333",
+          "collection": "decision_memory_v1",
+          "batch_size": 100,
+          "filter": {
+            "must": [
+              {
+                "key": "created_at",
+                "range": {
+                  "gte": "2026-01-01T00:00:00+00:00"
+                }
+              }
+            ]
+          }
+        },
+        "sink": {
+          "type": "qdrant",
+          "url": "http://qdrant:6333",
+          "collection": "decision_memory_v2",
+          "create_if_missing": true,
+          "vectors_config": {
+            "dense": {
+              "size": 1024,
+              "distance": "Cosine",
+              "type": "dense"
+            }
+          }
+        },
+        "transform": {
+          "callback": [
+            {
+              "url": "http://vector-db-gateway:8526/transform/embed",
+              "headers": {
+                "X-API-Key": "change-me"
+              },
+              "input_field": "situation_text",
+              "output_field": "dense",
+              "batch_size": 32,
+              "timeout": 60,
+              "retries": 2
+            }
+          ]
+        },
+        "throttle": {
+          "max_batch_per_second": 2,
+          "adaptive": true,
+          "health_check": {
+            "url": "http://qdrant:6333/healthz",
+            "max_latency_ms": 500
+          }
+        },
+        "checkpoint": {
+          "mode": "sqlite",
+          "interval": 20
+        }
+      },
       "window": {
         "start": "06:30",
         "stop_dispatch": "07:05",
         "pause_at": "07:10"
       },
       "status": "queued",
+      "sequence": 60,
       "note": "recent created_at bucket"
     }
   ]

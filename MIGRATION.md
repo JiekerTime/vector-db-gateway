@@ -83,7 +83,7 @@ The split dimension is chosen by the migration task, not by the caller. A migrat
 
 ## do-mig Responsibilities
 
-`do-mig` should own the migration queue and execution schedule.
+`do-mig` should own the migration queue and execution state.
 
 Recommended queue payload:
 
@@ -110,6 +110,7 @@ Recommended dispatch rules:
 - a day can contain many windows, for example `01:00-02:00`, `05:00-06:00`, `13:00-14:00`, `21:00-22:00`
 - each window should stop dispatch a few minutes before the hard pause time
 - `do-mig` should enqueue the next slice immediately after the current slice finishes or pauses
+- `decision_memory` should use the same queue model instead of a separate manual migration path
 
 Recommended queue fields:
 
@@ -146,8 +147,26 @@ Recommended ownership split:
 
 - `vector-db-gateway`: routing truth and migration phase history
 - `db-migrator`: execution engine for copy, transform, verify, pause, and resume
-- `do-mig`: queue, scheduling window, retries, and dispatch policy
-- `n8n`: optional outer scheduler that triggers `do-mig`, not the source of truth
+- `do-mig`: queue, execution state, scheduling policy, retries, and dispatch policy
+- `n8n`: the standard timer and orchestration entrypoint; it triggers `do-mig` on schedule
+- `write-disk`: the execution surface used by `do-mig` for queued task persistence or dispatch
+
+## Scheduling Standard
+
+The standard production chain should be:
+
+```text
+n8n -> do-mig -> write-disk -> vector-db-gateway / db-migrator
+```
+
+This means:
+
+- recurring time windows should be defined in `n8n`
+- `do-mig` decides what queue item is runnable in the current window
+- `write-disk` is used as the execution and persistence surface for scheduled jobs
+- the gateway remains the runtime source of truth for routing and migration phase
+
+Emergency takeover tools such as local `cron` or direct CLI loops can still be used temporarily, but they are not the long-term scheduling contract.
 
 ## Resume Semantics
 

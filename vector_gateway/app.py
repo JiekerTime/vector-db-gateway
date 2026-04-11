@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException
@@ -13,6 +14,7 @@ from fastapi.responses import PlainTextResponse
 from vector_gateway.backends import LocalEmbeddingBackend, QdrantStore
 from vector_gateway.config import CollectionConfig, EmbeddingModelConfig, GatewayConfig, load_config
 from vector_gateway.core.batching import EmbeddingBatcher
+from vector_gateway.core.do_mig import DBMigratorClient, DoMigRunner, WriteDiskQueueStore
 from vector_gateway.core.logical_registry import LogicalCollectionRegistry
 from vector_gateway.core.metrics import MetricsStore
 from vector_gateway.core.router import Router
@@ -26,6 +28,9 @@ from vector_gateway.models import (
     CollectionInfo,
     CountRequest,
     CountResponse,
+    DoMigQueueImportRequest,
+    DoMigQueueItem,
+    DoMigRunResponse,
     EmbedRequest,
     EmbedResponse,
     EmbeddingModelInfo,
@@ -68,6 +73,7 @@ _qdrant: QdrantStore
 _model_registry: dict[str, EmbeddingModelConfig]
 _state_store: MigrationStateStore
 _logical_registry: LogicalCollectionRegistry
+_do_mig_runner: DoMigRunner | None = None
 _started_at: float = 0.0
 
 logging.basicConfig(
@@ -82,7 +88,7 @@ logger = logging.getLogger("vector-gateway")
 async def lifespan(_: FastAPI):
     global _config, _router, _metrics, _selector
     global _embed_backend, _embed_batcher, _job_scheduler, _qdrant, _model_registry, _started_at
-    global _state_store, _logical_registry
+    global _state_store, _logical_registry, _do_mig_runner
 
     _started_at = time.monotonic()
     _config = load_config()
@@ -96,6 +102,18 @@ async def lifespan(_: FastAPI):
     _qdrant = QdrantStore(_config.qdrant, _config.collections)
     _state_store = MigrationStateStore(_config.state_dir)
     _logical_registry = LogicalCollectionRegistry(_config, _state_store)
+    _do_mig_runner = None
+    if _config.do_mig.enabled and _config.write_disk and _config.db_migrator:
+        _do_mig_runner = DoMigRunner(
+            _config.do_mig,
+            WriteDiskQueueStore(
+                _config.write_disk,
+                _config.do_mig.queue_channel,
+                batch_limit=_config.do_mig.batch_limit,
+            ),
+            DBMigratorClient(_config.db_migrator),
+            _logical_registry,
+        )
 
     try:
         await _qdrant.ensure_collections()
@@ -141,6 +159,12 @@ app = FastAPI(title="vector-db-gateway", version="0.2.0", lifespan=lifespan)
 def _check_api_key(x_api_key: str = Header(default="")) -> None:
     if x_api_key != _config.api_key:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+def _require_do_mig() -> DoMigRunner:
+    if _do_mig_runner is None:
+        raise HTTPException(status_code=503, detail="do-mig is not configured")
+    return _do_mig_runner
 
 
 @app.get("/health")
@@ -259,6 +283,26 @@ async def logical_migration_action(
     return await _logical_info(logical_name)
 
 
+@app.get("/do-mig/queue/items", response_model=list[DoMigQueueItem])
+async def do_mig_queue_items(x_api_key: str = Header(default="")):
+    _check_api_key(x_api_key)
+    return _require_do_mig().list_items()
+
+
+@app.post("/do-mig/queue/import", response_model=list[DoMigQueueItem])
+async def do_mig_queue_import(request: DoMigQueueImportRequest, x_api_key: str = Header(default="")):
+    _check_api_key(x_api_key)
+    return _require_do_mig().import_items(request.items)
+
+
+@app.post("/do-mig/queue/run", response_model=DoMigRunResponse)
+async def do_mig_queue_run(x_api_key: str = Header(default="")):
+    _check_api_key(x_api_key)
+    now = datetime.now().astimezone()
+    result = _require_do_mig().run_once(now)
+    return DoMigRunResponse(action=result.action, now=now.isoformat(), items=result.items)
+
+
 @app.post("/collections/ensure", response_model=EnsureCollectionResponse)
 async def ensure_collection(request: EnsureCollectionRequest, x_api_key: str = Header(default="")):
     _check_api_key(x_api_key)
@@ -303,6 +347,8 @@ async def capabilities(x_api_key: str = Header(default="")):
             CapabilityAction(name="scroll", endpoint="/scroll", description="Scroll records from a collection"),
             CapabilityAction(name="live_collections", endpoint="/collections/live", description="List live collections discovered from Qdrant"),
             CapabilityAction(name="logical_collections", endpoint="/collections/logical", description="List logical collection routes and migration state"),
+            CapabilityAction(name="do_mig_queue", endpoint="/do-mig/queue/items", description="Inspect queued migration slices stored in write-disk"),
+            CapabilityAction(name="do_mig_run", endpoint="/do-mig/queue/run", description="Advance the queued migration runner by one step"),
             CapabilityAction(name="count", endpoint="/count", description="Count records in a collection"),
             CapabilityAction(name="ensure_collection", endpoint="/collections/ensure", description="Create or validate a collection for vector writes"),
             CapabilityAction(name="set_payload", endpoint="/payload/set", description="Set payload fields for many points"),

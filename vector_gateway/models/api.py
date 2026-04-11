@@ -320,6 +320,39 @@ class MigrationEvent(BaseModel):
     created_at: str
 
 
+class DoMigWindow(BaseModel):
+    start: str
+    stop_dispatch: str
+    pause_at: str
+
+
+class DoMigQueueItem(BaseModel):
+    id: str
+    logical_collection: str
+    task_config: dict[str, Any] | None = None
+    shards: list[str] = Field(default_factory=list)
+    window: DoMigWindow
+    status: str = "queued"
+    task_id: str | None = None
+    attempts: int = 0
+    last_error: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    note: str | None = None
+    sequence: int = 0
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class DoMigQueueImportRequest(BaseModel):
+    items: list[DoMigQueueItem] = Field(default_factory=list)
+
+
+class DoMigRunResponse(BaseModel):
+    action: str
+    now: str
+    items: list[DoMigQueueItem] = Field(default_factory=list)
+
+
 class RetrieveRequest(BaseModel):
     caller: str = "interactive/default"
     operation: str = "retrieve"
