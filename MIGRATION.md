@@ -70,6 +70,20 @@ The gateway owns:
 
 Migration workers should not infer routing from old task files. They should read the current runtime state from the gateway.
 
+## Current Runtime Boundary
+
+As of 2026-04-12, `do-mig` is implemented inside `vector-db-gateway` rather than treated as a separate project-level control plane.
+
+The current boundary is:
+
+- `vector-db-gateway`: routing truth, logical migration phase, and append-only migration history
+- `do-mig`: queue dispatch, scheduling windows, retries, and slice progression
+- `db-migrator`: execution engine for copy, transform, verify, pause, and resume
+- `write-disk`: queued task persistence
+- `n8n`: timed trigger
+
+That means `db-migrator` has a narrower role than before. It should be treated as a worker-style migration executor, not as the owner of migration truth or scheduling policy.
+
 ## Partitioned Backfill
 
 Partitioning is a database concern, not a business term.
@@ -165,6 +179,7 @@ This means:
 - `do-mig` decides what queue item is runnable in the current window
 - `write-disk` is used as the execution and persistence surface for scheduled jobs
 - the gateway remains the runtime source of truth for routing and migration phase
+- `db-migrator` remains the execution worker behind queued tasks, not the scheduling owner
 
 Emergency takeover tools such as local `cron` or direct CLI loops can still be used temporarily, but they are not the long-term scheduling contract.
 
@@ -200,6 +215,7 @@ Two production lessons are now part of the migration contract:
 
 - dense vector size mismatches must fail at the gateway boundary as `400`, not bubble out as Qdrant `500`
 - hotpatching the gateway restarts the container, so it must be treated as an online interruption even if the current migration queue is idle
+- Watchtower may try to pull unqualified local images such as `db-migrator:latest` from `docker.io/library/*`; a resulting `pull access denied` does not by itself indicate migration runtime failure
 
 For the current production shape:
 

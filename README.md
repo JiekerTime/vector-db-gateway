@@ -42,6 +42,24 @@ Key properties:
 - online requests can preempt low-priority work
 - low-priority work has anti-starvation protection
 
+## Migration runtime
+
+The current migration runtime is intentionally split across control-plane and execution-plane roles:
+
+- `vector-db-gateway`: routing truth, logical collection state, migration events, and runtime API surface
+- `do-mig`: queue-aware migration runner integrated into the gateway codebase
+- `db-migrator`: execution engine for copy, transform, verify, pause, and resume
+- `write-disk`: persistent queue surface for scheduled migration slices
+- `n8n`: timer and orchestration trigger, not the source of routing truth
+
+The standard production chain is:
+
+```text
+n8n -> do-mig -> write-disk -> vector-db-gateway / db-migrator
+```
+
+This means `db-migrator` is no longer treated as the migration control plane. It is a worker-style service invoked by the gateway-owned migration runtime.
+
 ## API
 
 ### `POST /embed`
@@ -87,6 +105,18 @@ List logical collections, current routing targets, and recent migration events.
 ### `GET /collections/logical/{name}/migration/events`
 
 Read append-only migration events for resume-safe orchestration.
+
+### `GET /do-mig/queue/items`
+
+Inspect queued migration slices stored in `write-disk`.
+
+### `POST /do-mig/queue/import`
+
+Import migration queue items into the configured queue channel.
+
+### `POST /do-mig/queue/run`
+
+Advance the integrated migration runner by one scheduling step.
 
 ### `GET /queues`
 
@@ -149,6 +179,12 @@ Current production migration shape:
 
 - `knowledge`: hybrid target, `dense + sparse`
 - `decision_memory`: hybrid `v2` target, with new traffic already routed to `decision_memory_v2` and legacy data backfilled asynchronously
+
+Operational role split:
+
+- `vector-db-gateway` owns logical collection routing and migration truth
+- `db-migrator` executes migration tasks but does not own migration truth
+- `do-mig` owns queue dispatch and window-aware progression
 
 ## Request model
 
@@ -252,7 +288,15 @@ CPU-only deployment:
 VECTOR_GATEWAY_GPU_MODE=off ./deploy.sh
 ```
 
+Watchtower is disabled for this container by default during `./deploy.sh` because the image is normally built locally rather than pulled from a public registry. Override only if the image name is backed by a real registry:
+
+```bash
+VECTOR_GATEWAY_WATCHTOWER_ENABLE=true ./deploy.sh
+```
+
 `./deploy.sh hotpatch` restarts the running container. Treat it as a short service interruption and avoid using it during an active migration slice unless the change is urgent.
+
+If local images are monitored by Watchtower with unqualified names such as `vector-db-gateway:latest` or `db-migrator:latest`, Watchtower may try to pull them from `docker.io/library/*` and report `pull access denied`. That log means the image is not a public Hub image; it does not by itself prove the running service is unhealthy.
 
 ## Project layout
 

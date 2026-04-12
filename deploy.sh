@@ -11,6 +11,7 @@ NETWORK="docker_proxy"
 DATA_DIR="/data/vector_db_gateway"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 GPU_MODE="${VECTOR_GATEWAY_GPU_MODE:-auto}"
+WATCHTOWER_ENABLE="${VECTOR_GATEWAY_WATCHTOWER_ENABLE:-false}"
 
 SSH_CMD="ssh -i $SSH_KEY $REMOTE"
 RSYNC_SSH="ssh -i $SSH_KEY"
@@ -64,6 +65,7 @@ full_deploy() {
         docker run -d \
             --name $CONTAINER \
             --restart unless-stopped \
+            --label com.centurylinklabs.watchtower.enable=$WATCHTOWER_ENABLE \
             $gpu_args \
             --network $NETWORK \
             -p $PORT:8526 \
