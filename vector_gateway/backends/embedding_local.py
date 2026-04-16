@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
+import os
 import threading
+import time
 
 from vector_gateway.config import EmbeddingConfig, EmbeddingModelConfig
 
@@ -19,7 +22,12 @@ class LocalEmbeddingBackend:
         self._model_registry = model_registry
         self._models: dict[str, object] = {}
         self._model_devices: dict[str, str] = {}
+        self._model_last_used: dict[str, float] = {}
         self._lock = threading.Lock()
+        if self._config.cpu_threads:
+            thread_count = str(max(1, self._config.cpu_threads))
+            os.environ.setdefault("OMP_NUM_THREADS", thread_count)
+            os.environ.setdefault("MKL_NUM_THREADS", thread_count)
 
     async def embed_texts(
         self,
@@ -49,6 +57,10 @@ class LocalEmbeddingBackend:
                 "enabled": self._config.warmup_enabled,
                 "models": self._config.warmup_models or sorted(self._model_registry.keys()),
                 "devices": self._config.warmup_devices,
+            },
+            "idle_unload": {
+                "seconds": self._config.idle_unload_seconds,
+                "devices": self._config.idle_unload_devices,
             },
         }
 
@@ -160,25 +172,41 @@ class LocalEmbeddingBackend:
         logger.warning("Requested device '%s' is unavailable, falling back to cpu", target)
         return "cpu"
 
+    def _configure_runtime(self, profile: EmbeddingModelConfig) -> None:
+        if (profile.device or self._config.device) != "cpu":
+            return
+        try:
+            import torch
+        except (ImportError, OSError):
+            return
+        if self._config.cpu_threads:
+            torch.set_num_threads(max(1, self._config.cpu_threads))
+        if self._config.cpu_interop_threads:
+            try:
+                torch.set_num_interop_threads(max(1, self._config.cpu_interop_threads))
+            except RuntimeError:
+                pass
+
     def _embed_sync(
         self,
         texts: list[str],
         profile_name: str,
         profile: EmbeddingModelConfig,
     ) -> list[list[float]]:
-        model = self._get_or_load_model(profile_name, profile)
-        vectors = model.encode(
-            texts,
-            batch_size=self._config.batch_size,
-            normalize_embeddings=(
-                self._config.normalize_embeddings
-                if profile.normalize_embeddings is None
-                else profile.normalize_embeddings
-            ),
-            show_progress_bar=False,
-            convert_to_numpy=True,
-        )
-        return vectors.tolist()
+        try:
+            return self._encode_sync(texts, profile_name, profile)
+        except Exception as exc:
+            fallback = self._fallback_profile(profile_name, profile)
+            if fallback is None:
+                raise
+            fallback_name, fallback_profile = fallback
+            logger.warning(
+                "Embedding failed on %s for %s, retrying on cpu: %s",
+                profile.device,
+                profile.model_name,
+                exc,
+            )
+            return self._encode_sync(texts, fallback_name, fallback_profile)
 
     def _warmup_sync(
         self,
@@ -186,10 +214,34 @@ class LocalEmbeddingBackend:
         profile_name: str,
         profile: EmbeddingModelConfig,
     ) -> None:
+        try:
+            self._encode_sync(texts, profile_name, profile, batch_size=1)
+        except Exception as exc:
+            fallback = self._fallback_profile(profile_name, profile)
+            if fallback is None:
+                raise
+            fallback_name, fallback_profile = fallback
+            logger.warning(
+                "Warmup failed on %s for %s, retrying on cpu: %s",
+                profile.device,
+                profile.model_name,
+                exc,
+            )
+            self._encode_sync(texts, fallback_name, fallback_profile, batch_size=1)
+
+    def _encode_sync(
+        self,
+        texts: list[str],
+        profile_name: str,
+        profile: EmbeddingModelConfig,
+        *,
+        batch_size: int | None = None,
+    ) -> list[list[float]]:
+        self._configure_runtime(profile)
         model = self._get_or_load_model(profile_name, profile)
-        model.encode(
+        vectors = model.encode(
             texts,
-            batch_size=1,
+            batch_size=batch_size or self._config.batch_size,
             normalize_embeddings=(
                 self._config.normalize_embeddings
                 if profile.normalize_embeddings is None
@@ -198,11 +250,73 @@ class LocalEmbeddingBackend:
             show_progress_bar=False,
             convert_to_numpy=True,
         )
+        self._touch_model(profile_name)
+        return vectors.tolist()
+
+    def unload_idle_models(
+        self,
+        idle_seconds: int | None = None,
+        *,
+        devices: set[str] | None = None,
+    ) -> list[str]:
+        max_idle = idle_seconds if idle_seconds is not None else self._config.idle_unload_seconds
+        if not max_idle or max_idle <= 0:
+            return []
+
+        allowed_devices = {device.lower() for device in (devices or self._config.idle_unload_devices or [])}
+        now = time.monotonic()
+        unloaded: list[str] = []
+        released_cuda = False
+
+        with self._lock:
+            for profile_name in list(self._models.keys()):
+                last_used = self._model_last_used.get(profile_name, now)
+                if now - last_used < max_idle:
+                    continue
+                device = (self._model_devices.get(profile_name) or "").lower()
+                if allowed_devices and device not in allowed_devices:
+                    continue
+                self._models.pop(profile_name, None)
+                self._model_devices.pop(profile_name, None)
+                self._model_last_used.pop(profile_name, None)
+                unloaded.append(profile_name)
+                if device == "cuda":
+                    released_cuda = True
+
+        if not unloaded:
+            return []
+
+        gc.collect()
+        if released_cuda:
+            try:
+                import torch
+            except (ImportError, OSError):
+                return unloaded
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                logger.exception("Failed to clear CUDA cache after unloading idle profiles")
+        return unloaded
+
+    def _fallback_profile(
+        self,
+        profile_name: str,
+        profile: EmbeddingModelConfig,
+    ) -> tuple[str, EmbeddingModelConfig] | None:
+        current_device = (profile.device or self._config.device or "auto").lower()
+        if current_device == "cpu":
+            return None
+        if "cpu" not in self.available_devices():
+            return None
+        base_name = profile_name.split("@", 1)[0]
+        fallback_profile = profile.model_copy(update={"device": "cpu"})
+        return f"{base_name}@cpu", fallback_profile
 
     def _get_or_load_model(self, profile_name: str, profile: EmbeddingModelConfig):
         with self._lock:
             cached = self._models.get(profile_name)
             if cached is not None:
+                self._model_last_used[profile_name] = time.monotonic()
                 return cached
 
             try:
@@ -232,4 +346,10 @@ class LocalEmbeddingBackend:
                 )
             self._models[profile_name] = model
             self._model_devices[profile_name] = profile.device or self._config.device
+            self._model_last_used[profile_name] = time.monotonic()
             return model
+
+    def _touch_model(self, profile_name: str) -> None:
+        with self._lock:
+            if profile_name in self._models:
+                self._model_last_used[profile_name] = time.monotonic()

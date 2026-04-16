@@ -130,6 +130,44 @@ class DoMigRunnerTest(unittest.TestCase):
             self.assertEqual(item.status, "paused")
             self.assertEqual(migrator.tasks["task-9"]["status"], "paused")
 
+    def test_list_items_recovers_completed_task_from_migration_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _gateway_config(tmpdir)
+            store = MigrationStateStore(tmpdir)
+            registry = LogicalCollectionRegistry(config, store)
+            registry.bootstrap()
+            registry.backfill(
+                "knowledge",
+                task_id="task-42",
+                metadata={
+                    "queue_item_id": "knowledge-batch-4",
+                    "shards": ["fowler", "pavlo"],
+                },
+            )
+            queue = FakeQueueStore(
+                [
+                    DoMigQueueItem(
+                        id="knowledge-batch-4",
+                        logical_collection="knowledge",
+                        task_config={"source": "a", "sink": "b"},
+                        shards=["fowler", "pavlo"],
+                        status="queued",
+                        window=DoMigWindow(start="02:30", stop_dispatch="03:05", pause_at="03:10"),
+                    )
+                ]
+            )
+            migrator = FakeMigrator()
+            migrator.tasks["task-42"] = {"status": "completed"}
+            runner = DoMigRunner(DoMigConfig(enabled=True), queue, migrator, registry)
+
+            items = runner.list_items()
+
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0].task_id, "task-42")
+            self.assertEqual(items[0].status, "completed")
+            self.assertEqual(queue.items["knowledge-batch-4"].task_id, "task-42")
+            self.assertEqual(queue.items["knowledge-batch-4"].status, "completed")
+
 
 if __name__ == "__main__":
     unittest.main()

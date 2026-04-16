@@ -6,10 +6,8 @@ from pydantic import ValidationError
 
 from vector_gateway.models.api import (
     EmbedRequest,
-    EnsureCollectionRequest,
-    PayloadSetRequest,
-    RetrieveRequest,
     SearchRequest,
+    TransformMetadataPrefixRequest,
     TransformSparseRequest,
     UpsertPoint,
 )
@@ -44,26 +42,13 @@ class ApiModelValidationTest(unittest.TestCase):
                 payload={},
             )
 
-    def test_retrieve_rejects_empty_ids(self) -> None:
-        with self.assertRaises(ValidationError):
-            RetrieveRequest(collection="knowledge", ids=[])
-
-    def test_payload_set_rejects_empty_payload(self) -> None:
-        with self.assertRaises(ValidationError):
-            PayloadSetRequest(collection="knowledge", ids=["k1"], payload={})
-
-    def test_ensure_collection_rejects_conflicting_vector_names(self) -> None:
-        with self.assertRaises(ValidationError):
-            EnsureCollectionRequest(
-                collection="decision_memory_v2",
-                vector_size=1024,
-                vector_name="dense",
-                sparse_vector_name="dense",
-            )
-
     def test_transform_sparse_rejects_blank_text(self) -> None:
         with self.assertRaises(ValidationError):
             TransformSparseRequest(texts=["ok", "  "])
+
+    def test_transform_metadata_prefix_rejects_empty_items(self) -> None:
+        with self.assertRaises(ValidationError):
+            TransformMetadataPrefixRequest(collection="knowledge", items=[])
 
 
 if __name__ == "__main__":

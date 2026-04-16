@@ -24,6 +24,12 @@ The stable callback target for bulk re-embedding is:
 POST /transform/embed
 ```
 
+Step8 Phase 2 2e metadata contextualization uses:
+
+```text
+POST /transform/metadata_prefix
+```
+
 Expected request:
 
 ```json
@@ -46,15 +52,56 @@ Expected response:
 
 Any migration worker that can issue HTTP callback transforms can use this protocol.
 
+Metadata prefix request:
+
+```json
+{
+  "collection": "knowledge",
+  "items": [
+    {
+      "text": "Revenue grew by 3% over previous quarter.",
+      "payload": {
+        "expert_name": "acme_finance_analyst",
+        "source": "https://example.com/filing",
+        "topic": "Q2 2023 revenue"
+      }
+    }
+  ]
+}
+```
+
+Metadata prefix response:
+
+```json
+{
+  "items": [
+    {
+      "text": "[acme_finance_analyst | Source: https://example.com/filing | Topic: Q2 2023 revenue]\nRevenue grew by 3% over previous quarter.",
+      "prefix": "[acme_finance_analyst | Source: https://example.com/filing | Topic: Q2 2023 revenue]",
+      "payload": {
+        "expert_name": "acme_finance_analyst",
+        "source": "https://example.com/filing",
+        "topic": "Q2 2023 revenue",
+        "text_raw": "Revenue grew by 3% over previous quarter.",
+        "metadata_prefix": "[acme_finance_analyst | Source: https://example.com/filing | Topic: Q2 2023 revenue]",
+        "text": "[acme_finance_analyst | Source: https://example.com/filing | Topic: Q2 2023 revenue]\nRevenue grew by 3% over previous quarter."
+      }
+    }
+  ]
+}
+```
+
 ## Recommended migration flow
 
 1. Register a new model under `models`.
 2. Register a new target collection under `collections`.
-3. Read source records from the old collection.
-4. Re-embed through `/transform/embed`.
-5. Write into the target collection.
-6. Verify target counts and samples.
-7. Flip callers to the new collection or alias.
+3. Configure `logical_collections.<name>.metadata_prefix` if Step8 2e is required.
+4. Read source records from the old collection.
+5. Optionally call `/transform/metadata_prefix` for callback-based backfill pipelines.
+6. Re-embed through `/transform/embed` or write through `/upsert/chunks` (which now applies metadata prefix automatically when configured).
+7. Write into the target collection.
+8. Verify target counts and samples.
+9. Flip callers to the new collection or alias.
 
 ## Logical Collections And Runtime Control
 
@@ -209,6 +256,9 @@ That lets `do-mig` resume safely:
 3. compare its own queued task with the last recorded phase and checkpoint
 4. continue with the next partition batch or resume the paused one
 
+The gateway now also uses this event history to reconcile stale queue records.
+If a queue item lost its `task_id` or status update but a prior migration event recorded the same `queue_item_id`, `do-mig` will recover the task linkage and refresh the queue item from `db-migrator` state instead of requiring manual cleanup.
+
 ## Operational Notes From 2026-04-12
 
 Two production lessons are now part of the migration contract:
@@ -227,11 +277,16 @@ If a target collection is still empty and its schema is outdated, the gateway ma
 
 ## Agent And CLI Integration
 
-Machine clients can use:
+Machine clients and CLI integrations should read gateway state from:
 
-- `GET /capabilities`
+- `GET /status`
+- `GET /queues`
 - `GET /models`
 - `GET /collections`
-- `POST /agent/action`
+- `GET /collections/logical`
+- `GET /capabilities`
 
-This keeps the control plane stable for future CLI and agent integrations.
+Supported write and query operations should still go through gateway endpoints such as `/search`, `/upsert/chunks`, `/upsert/points`, or the reduced `/agent/action` surface.
+Generic database passthrough endpoints are intentionally no longer part of the integration contract.
+
+External callers such as `claude.ruoyi.net.cn` should switch to this gateway contract instead of reading Qdrant or legacy database entrypoints directly.

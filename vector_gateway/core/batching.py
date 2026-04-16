@@ -31,8 +31,18 @@ class EmbedTask:
     route: RouteDecision
     model_name: str
     device: str | None
+    offset: int
     created_at: float
+    aggregate: "EmbedAggregate"
+
+
+@dataclass
+class EmbedAggregate:
     future: asyncio.Future
+    vectors: list[list[float] | None]
+    remaining_parts: int
+    queue_wait_ms: int = 0
+    batch_size: int = 0
 
 
 @dataclass
@@ -84,15 +94,6 @@ class EmbeddingBatcher:
     ) -> EmbedBatchResult:
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
-        task = EmbedTask(
-            request_id=request_id,
-            texts=texts,
-            route=route,
-            model_name=model_name,
-            device=device,
-            created_at=time.monotonic(),
-            future=future,
-        )
         key = BatchKey(
             queue_name=route.queue_name,
             model_name=model_name,
@@ -100,8 +101,35 @@ class EmbeddingBatcher:
             service_priority=route.service_priority,
             operation_priority=route.operation_priority,
         )
+        queue_cfg = self._queue_config[route.queue_name]
+        max_batch_size = max(1, queue_cfg.max_batch_size)
+        created_at = time.monotonic()
+        parts = [
+            texts[start : start + max_batch_size]
+            for start in range(0, len(texts), max_batch_size)
+        ] or [[]]
+        aggregate = EmbedAggregate(
+            future=future,
+            vectors=[None] * len(texts),
+            remaining_parts=len(parts),
+            batch_size=len(texts),
+        )
         async with self._condition:
-            self._buffers.setdefault(key, []).append(task)
+            buffer = self._buffers.setdefault(key, [])
+            offset = 0
+            for part in parts:
+                task = EmbedTask(
+                    request_id=request_id,
+                    texts=part,
+                    route=route,
+                    model_name=model_name,
+                    device=device,
+                    offset=offset,
+                    created_at=created_at,
+                    aggregate=aggregate,
+                )
+                offset += len(part)
+                buffer.append(task)
             self._condition.notify_all()
         return await future
 
@@ -153,8 +181,8 @@ class EmbeddingBatcher:
                 )
             except Exception as exc:  # pragma: no cover - exercised by integration
                 for task in batch_tasks:
-                    if not task.future.done():
-                        task.future.set_exception(exc)
+                    if not task.aggregate.future.done():
+                        task.aggregate.future.set_exception(exc)
                 logger.exception("Embedding batch failed: queue=%s", batch_key.queue_name)
                 continue
 
@@ -168,12 +196,18 @@ class EmbeddingBatcher:
                 size = len(task.texts)
                 task_vectors = vectors[offset : offset + size]
                 offset += size
-                if not task.future.done():
-                    task.future.set_result(
+                aggregate = task.aggregate
+                start = task.offset
+                for index, vector in enumerate(task_vectors):
+                    aggregate.vectors[start + index] = vector
+                aggregate.queue_wait_ms = max(aggregate.queue_wait_ms, queue_wait_ms)
+                aggregate.remaining_parts -= 1
+                if aggregate.remaining_parts == 0 and not aggregate.future.done():
+                    aggregate.future.set_result(
                         EmbedBatchResult(
-                            vectors=task_vectors,
-                            queue_wait_ms=queue_wait_ms,
-                            batch_size=len(flat_texts),
+                            vectors=[vector for vector in aggregate.vectors if vector is not None],
+                            queue_wait_ms=aggregate.queue_wait_ms,
+                            batch_size=aggregate.batch_size,
                         )
                     )
 

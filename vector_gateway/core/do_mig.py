@@ -14,6 +14,16 @@ from vector_gateway.core.logical_registry import LogicalCollectionRegistry
 from vector_gateway.models.api import DoMigQueueItem
 
 
+class ServiceRequestError(RuntimeError):
+    def __init__(self, method: str, path: str, status_code: int, detail: str):
+        message = f"{method} {path} failed: {status_code} {detail}"
+        super().__init__(message)
+        self.method = method
+        self.path = path
+        self.status_code = status_code
+        self.detail = detail
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -42,7 +52,7 @@ def _json_request(
             raw = resp.read().decode("utf-8")
     except error.HTTPError as exc:  # pragma: no cover - exercised via message surface
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"{method} {path} failed: {exc.code} {detail}") from exc
+        raise ServiceRequestError(method, path, exc.code, detail) from exc
     except error.URLError as exc:  # pragma: no cover - exercised via message surface
         raise RuntimeError(f"{method} {path} failed: {exc.reason}") from exc
     if not raw:
@@ -187,7 +197,10 @@ class DoMigRunner:
         self._lock = threading.Lock()
 
     def list_items(self) -> list[DoMigQueueItem]:
-        return self._queue_store.list_items()
+        with self._lock:
+            items = self._queue_store.list_items()
+            self._reconcile_items_locked(items)
+            return items
 
     def import_items(self, items: list[DoMigQueueItem]) -> list[DoMigQueueItem]:
         stored: list[DoMigQueueItem] = []
@@ -203,6 +216,7 @@ class DoMigRunner:
 
     def _run_once_locked(self, now: datetime) -> DoMigRunResult:
         items = self._queue_store.list_items()
+        self._reconcile_items_locked(items)
 
         for item in items:
             task_status = self._refresh_item(item)
@@ -274,6 +288,82 @@ class DoMigRunner:
 
         return DoMigRunResult("No queue item due in the current window", items)
 
+    def _reconcile_items_locked(self, items: list[DoMigQueueItem]) -> None:
+        events_by_logical: dict[str, list[dict[str, Any]]] = {}
+        for item in items:
+            changed = False
+            if not item.task_id:
+                recovered_task_id = self._recover_task_id(item, events_by_logical)
+                if recovered_task_id:
+                    item.task_id = recovered_task_id
+                    if item.status in {"", "queued"}:
+                        item.status = "pending"
+                    changed = True
+            if not item.task_id:
+                if changed:
+                    item.updated_at = _utc_now()
+                    self._queue_store.upsert_item(item)
+                continue
+
+            try:
+                task = self._migrator.get_task(item.task_id)
+            except ServiceRequestError as exc:
+                if exc.status_code != 404:
+                    raise
+                if item.status not in {"completed", "failed"} or item.last_error != f"task {item.task_id} not found":
+                    item.status = "failed" if item.status != "completed" else item.status
+                    item.last_error = f"task {item.task_id} not found"
+                    changed = True
+            else:
+                if self._sync_item_from_task(item, task):
+                    changed = True
+
+            if changed:
+                item.updated_at = _utc_now()
+                self._queue_store.upsert_item(item)
+
+    def _recover_task_id(
+        self,
+        item: DoMigQueueItem,
+        events_by_logical: dict[str, list[dict[str, Any]]],
+    ) -> str | None:
+        events = events_by_logical.get(item.logical_collection)
+        if events is None:
+            events = self._logical_registry.list_events(item.logical_collection, limit=200)
+            events_by_logical[item.logical_collection] = events
+        for event in events:
+            metadata = event.get("metadata") or {}
+            if metadata.get("queue_item_id") != item.id:
+                continue
+            task_id = str(event.get("task_id") or "").strip()
+            if task_id:
+                return task_id
+        return None
+
+    def _sync_item_from_task(self, item: DoMigQueueItem, task: dict[str, Any]) -> bool:
+        changed = False
+        last_error = item.last_error
+        previous_status = item.status
+        status = str(task.get("status") or "unknown")
+        if status == "completed":
+            item.status = "completed"
+            item.last_error = None
+        elif status == "failed":
+            item.status = "failed"
+            item.last_error = f"task {item.task_id} failed"
+        elif status == "paused":
+            if item.status in {"", "running"}:
+                item.status = "paused"
+        elif status == "running":
+            item.status = "running"
+            item.last_error = None
+        elif status == "pending":
+            if not item.status:
+                item.status = "queued"
+        else:
+            item.status = status
+        return previous_status != item.status or last_error != item.last_error
+
     def _refresh_item(self, item: DoMigQueueItem) -> str:
         if not item.task_id:
             item.status = item.status or "queued"
@@ -281,20 +371,7 @@ class DoMigRunner:
             return item.status
         task = self._migrator.get_task(item.task_id)
         status = str(task.get("status") or "unknown")
-        if status == "completed":
-            item.status = "completed"
-        elif status == "failed":
-            item.status = "failed"
-        elif status == "paused":
-            if item.status in {"", "running"}:
-                item.status = "paused"
-        elif status == "running":
-            item.status = "running"
-        elif status == "pending":
-            if not item.status:
-                item.status = "queued"
-        else:
-            item.status = status
+        self._sync_item_from_task(item, task)
         item.updated_at = _utc_now()
         return status
 

@@ -5,13 +5,14 @@
 It provides:
 
 - local embedding inference with queue-aware micro-batching
-- unified vector search, count, and upsert APIs
+- unified vector search and upsert APIs
 - centralized collection registry
 - centralized embedding model registry
 - caller-aware priority routing with fairness safeguards
-- operational endpoints for health, status, queues, and metrics
+- operational endpoints for health, status, queues, metrics, and CLI discovery
 
 It does not implement application-specific orchestration or database-specific CRUD passthrough.
+Clients such as `claude.ruoyi.net.cn` should talk to the gateway surface, not Qdrant or ad hoc database endpoints directly.
 
 ## Design
 
@@ -21,7 +22,6 @@ The service sits between arbitrary callers and vector infrastructure:
 caller
   ├── POST /embed
   ├── POST /search
-  ├── POST /count
   └── POST /upsert/chunks
        |
        v
@@ -70,13 +70,10 @@ Generate vectors for one or more texts.
 
 Search a registered collection with either a supplied vector or raw text.
 
-### `POST /count`
-
-Count points in a registered collection using a simplified filter format.
-
 ### `POST /upsert/chunks`
 
 Upsert text chunks. Missing vectors are generated through the embedding backend.
+If the target logical collection enables `metadata_prefix`, the gateway automatically prepends contextual metadata before embedding and sparse generation.
 
 ### `POST /upsert/points`
 
@@ -98,6 +95,19 @@ List registered embedding models and vector metadata.
 
 Machine-friendly capability discovery for CLI and agent clients.
 
+### CLI read contract
+
+CLI integrations should read gateway state from:
+
+- `GET /status`
+- `GET /queues`
+- `GET /collections`
+- `GET /collections/logical`
+- `GET /capabilities`
+
+The gateway exposes controlled operational collection surfaces such as `count`, `retrieve`, `scroll`, payload mutation, and `collections/ensure` for compatibility and maintenance paths.
+Callers should still treat the service as the vector control plane rather than a raw Qdrant proxy: prefer logical collection names and business-oriented endpoints where possible.
+
 ### `GET /collections/logical`
 
 List logical collections, current routing targets, and recent migration events.
@@ -109,6 +119,7 @@ Read append-only migration events for resume-safe orchestration.
 ### `GET /do-mig/queue/items`
 
 Inspect queued migration slices stored in `write-disk`.
+The gateway reconciles stale queue items against logical migration events and known task state before returning them.
 
 ### `POST /do-mig/queue/import`
 
@@ -117,6 +128,7 @@ Import migration queue items into the configured queue channel.
 ### `POST /do-mig/queue/run`
 
 Advance the integrated migration runner by one scheduling step.
+Before dispatch, the runner also self-heals queue items whose `task_id` can be recovered from migration event history.
 
 ### `GET /queues`
 
@@ -130,9 +142,14 @@ Prometheus-style metrics.
 
 Migration-safe callback surface for bulk re-embedding jobs.
 
+### `POST /transform/metadata_prefix`
+
+Apply the configured logical-collection metadata prefix policy to chunk texts.
+This is the Step8 Phase 2 2e callback surface for migration and batch pipelines.
+
 ### `POST /agent/action`
 
-Single action entrypoint for CLI and agent integrations.
+Single action entrypoint for machine callers using the supported gateway actions.
 
 ## Configuration
 
@@ -148,14 +165,22 @@ Main sections:
 - `operation_priority`
 - `fairness`
 - `collections`
+- `logical_collections`
 
 All collection metadata is centralized in config. Callers do not need to know vector size or distance settings.
+`metadata_prefix` now lives under each logical collection so callers do not need to hardcode the 2e prefix template.
 
 Queue configuration can also steer the default embedding device:
 
 - `realtime` can prefer `cuda`
 - `interactive` can prefer `auto`
 - `batch` can prefer `cpu`
+
+For notebook-style hosts, a more reasonable operating profile is:
+
+- warm only the CPU profile at startup, so the GPU is not pinned resident before any online traffic arrives
+- keep `batch` on `cpu`, so long-running ingest and backfill do not occupy the GPU by default
+- enable idle GPU unload, so a temporary accelerated burst does not leave the GPU model resident forever
 
 Request payloads can still override this with `device`.
 
@@ -198,6 +223,8 @@ The default configuration uses caller patterns such as:
 - `realtime/*`
 - `interactive/*`
 - `batch/*`
+
+For example, `claude.ruoyi.net.cn` should identify itself with a caller such as `interactive/claude.ruoyi.net.cn` and read runtime state from gateway endpoints instead of touching backend storage directly.
 
 Deployments can replace these rules without changing application code.
 
@@ -244,7 +271,7 @@ curl http://localhost:8526/embed \
   -H "Content-Type: application/json" \
   -H "X-API-Key: change-me" \
   -d '{
-    "caller": "realtime/demo",
+    "caller": "realtime/claude.ruoyi.net.cn",
     "operation": "query",
     "texts": ["hello vector gateway"],
     "device": "cpu"
@@ -258,7 +285,7 @@ curl http://localhost:8526/search \
   -H "Content-Type: application/json" \
   -H "X-API-Key: change-me" \
   -d '{
-    "caller": "interactive/demo",
+    "caller": "interactive/claude.ruoyi.net.cn",
     "collection": "documents",
     "text": "system design",
     "limit": 5
@@ -275,6 +302,27 @@ curl http://localhost:8526/transform/embed \
     "texts": ["chunk one", "chunk two"],
     "model": "default",
     "device": "auto"
+  }'
+```
+
+Metadata prefix callback:
+
+```bash
+curl http://localhost:8526/transform/metadata_prefix \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: change-me" \
+  -d '{
+    "collection": "knowledge",
+    "items": [
+      {
+        "text": "Revenue grew by 3% over previous quarter.",
+        "payload": {
+          "expert_name": "acme_finance_analyst",
+          "source": "https://example.com/filing",
+          "topic": "Q2 2023 revenue"
+        }
+      }
+    ]
   }'
 ```
 

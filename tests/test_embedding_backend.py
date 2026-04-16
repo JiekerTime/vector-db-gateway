@@ -55,9 +55,13 @@ class LocalEmbeddingBackendDeviceTest(unittest.TestCase):
     def test_warmup_uses_configured_profiles(self) -> None:
         warmed_profiles: list[tuple[str, str]] = []
 
+        class _FakeVectors(list):
+            def tolist(self):
+                return list(self)
+
         class _FakeModel:
             def encode(self, texts, **kwargs):
-                return [[0.0] for _ in texts]
+                return _FakeVectors([[0.0] for _ in texts])
 
         backend = LocalEmbeddingBackend(
             EmbeddingConfig(
@@ -86,6 +90,40 @@ class LocalEmbeddingBackendDeviceTest(unittest.TestCase):
         self.assertEqual(warmed_profiles, [("default@cpu", "cpu")])
         self.assertEqual(warmed[0]["profile"], "default@cpu")
         self.assertEqual(warmed[0]["device"], "cpu")
+
+    def test_unload_idle_models_only_releases_selected_devices(self) -> None:
+        backend = LocalEmbeddingBackend(
+            EmbeddingConfig(
+                device="auto",
+                idle_unload_seconds=60,
+                idle_unload_devices=["cuda"],
+            ),
+            {
+                "default": EmbeddingModelConfig(
+                    model_name="BAAI/bge-m3",
+                    vector_size=1024,
+                    device="auto",
+                )
+            },
+        )
+        backend._models = {
+            "default@cuda": object(),
+            "default@cpu": object(),
+        }
+        backend._model_devices = {
+            "default@cuda": "cuda",
+            "default@cpu": "cpu",
+        }
+        backend._model_last_used = {
+            "default@cuda": 0.0,
+            "default@cpu": 0.0,
+        }
+
+        unloaded = backend.unload_idle_models(60, devices={"cuda"})
+
+        self.assertEqual(unloaded, ["default@cuda"])
+        self.assertNotIn("default@cuda", backend._models)
+        self.assertIn("default@cpu", backend._models)
 
 
 if __name__ == "__main__":

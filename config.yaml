@@ -10,10 +10,14 @@ embedding:
   device: "auto"
   normalize_embeddings: true
   batch_size: 64
+  cpu_threads: 2
+  cpu_interop_threads: 1
   warmup_enabled: true
   warmup_models: ["default"]
-  warmup_devices: ["auto"]
+  warmup_devices: ["cpu"]
   warmup_probe_texts: ["warmup"]
+  idle_unload_seconds: 900
+  idle_unload_devices: ["cuda"]
 
 models:
   default:
@@ -53,6 +57,18 @@ queues:
     preferred_device: "cpu"
 
 routing_rules:
+  - caller_pattern: "interactive/group_portrait"
+    queue: "interactive"
+    service_priority: 0
+    operation: "search"
+  - caller_pattern: "interactive/hs-cli"
+    queue: "interactive"
+    service_priority: 1
+    operation: "search"
+  - caller_pattern: "interactive/claude.ruoyi.net.cn"
+    queue: "interactive"
+    service_priority: 2
+    operation: "search"
   - caller_pattern: "realtime/*"
     queue: "realtime"
     service_priority: 0
@@ -85,6 +101,15 @@ fairness:
   reserve_batch_share: 0.10
 
 collections:
+  outline_docs:
+    vector_size: 384
+    distance: "Cosine"
+    owner: "wiki"
+    model: "legacy_small"
+    query_model: "legacy_small"
+    write_model: "legacy_small"
+    aliases: []
+    description: "Legacy Outline wiki collection for search-server compatibility"
   knowledge_base_v2:
     vector_size: 1024
     distance: "Cosine"
@@ -129,6 +154,13 @@ collections:
     description: "Gateway-managed hybrid decision memory collection"
 
 logical_collections:
+  wiki:
+    read_targets: ["outline_docs"]
+    write_targets: ["outline_docs"]
+    default_query_mode: "dense"
+    alias_name: "wiki"
+    query_model: "legacy_small"
+    write_model: "legacy_small"
   knowledge:
     read_targets: ["knowledge_base_v2"]
     write_targets: ["knowledge_base_v2"]
@@ -136,6 +168,20 @@ logical_collections:
     alias_name: "knowledge"
     query_model: "default"
     write_model: "default"
+    metadata_prefix:
+      enabled: true
+      parts:
+        - payload_key: "expert_name"
+        - payload_key: "source"
+          label: "Source"
+        - payload_key: "topic"
+          label: "Topic"
+      separator: " | "
+      prefix: "["
+      suffix: "]"
+      text_payload_key: "text"
+      prefix_payload_key: "metadata_prefix"
+      raw_text_payload_key: "text_raw"
     migration:
       next_target: "knowledge_base_v3"
       scheduler: "n8n"

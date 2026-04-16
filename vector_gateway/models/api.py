@@ -600,3 +600,37 @@ class SparseVectorPayload(BaseModel):
 
 class TransformSparseResponse(BaseModel):
     vectors: list[SparseVectorPayload]
+
+
+class TransformMetadataPrefixItem(BaseModel):
+    text: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> "TransformMetadataPrefixItem":
+        _validate_text_value(self.text, "text")
+        return self
+
+
+class TransformMetadataPrefixRequest(BaseModel):
+    collection: str
+    items: list[TransformMetadataPrefixItem]
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> "TransformMetadataPrefixRequest":
+        _validate_text_value(self.collection, "collection")
+        if not self.items:
+            raise ValueError("'items' must not be empty")
+        if len(self.items) > _MAX_BATCH_ITEMS:
+            raise ValueError(f"'items' must contain at most {_MAX_BATCH_ITEMS} items")
+        return self
+
+
+class TransformMetadataPrefixResult(BaseModel):
+    text: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    prefix: str | None = None
+
+
+class TransformMetadataPrefixResponse(BaseModel):
+    items: list[TransformMetadataPrefixResult]

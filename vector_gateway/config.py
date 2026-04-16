@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class EmbeddingConfig(BaseModel):
@@ -15,10 +15,14 @@ class EmbeddingConfig(BaseModel):
     device: str = "auto"
     normalize_embeddings: bool = True
     batch_size: int = 64
+    cpu_threads: int | None = None
+    cpu_interop_threads: int | None = None
     warmup_enabled: bool = True
     warmup_models: list[str] = Field(default_factory=lambda: ["default"])
     warmup_devices: list[str] = Field(default_factory=lambda: ["auto"])
     warmup_probe_texts: list[str] = Field(default_factory=lambda: ["warmup"])
+    idle_unload_seconds: int | None = None
+    idle_unload_devices: list[str] = Field(default_factory=lambda: ["cuda"])
 
 
 class EmbeddingModelConfig(BaseModel):
@@ -75,6 +79,28 @@ class LogicalCollectionMigrationConfig(BaseModel):
     job_name: str | None = None
 
 
+class MetadataPrefixPartConfig(BaseModel):
+    payload_key: str
+    label: str | None = None
+
+
+class MetadataPrefixConfig(BaseModel):
+    enabled: bool = False
+    parts: list[MetadataPrefixPartConfig] = Field(default_factory=list)
+    separator: str = " | "
+    prefix: str = "["
+    suffix: str = "]"
+    text_payload_key: str = "text"
+    prefix_payload_key: str = "metadata_prefix"
+    raw_text_payload_key: str | None = "text_raw"
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> "MetadataPrefixConfig":
+        if self.enabled and not self.parts:
+            raise ValueError("'metadata_prefix.parts' must not be empty when enabled")
+        return self
+
+
 class LogicalCollectionConfig(BaseModel):
     read_targets: list[str] = Field(default_factory=list)
     write_targets: list[str] = Field(default_factory=list)
@@ -83,6 +109,7 @@ class LogicalCollectionConfig(BaseModel):
     query_model: str | None = None
     write_model: str | None = None
     migration: LogicalCollectionMigrationConfig = Field(default_factory=LogicalCollectionMigrationConfig)
+    metadata_prefix: MetadataPrefixConfig = Field(default_factory=MetadataPrefixConfig)
 
 
 class ServiceEndpointConfig(BaseModel):
