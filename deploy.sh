@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REMOTE="root@192.168.1.100"
-SSH_KEY="$HOME/.ssh/ali"
+REMOTE="${VECTOR_GATEWAY_REMOTE:-homeserver-ext}"
+SSH_KEY="${VECTOR_GATEWAY_SSH_KEY:-}"
+if [[ -z "$SSH_KEY" && "$REMOTE" == *@192.168.1.100 ]]; then
+    SSH_KEY="$HOME/.ssh/ali"
+fi
 REMOTE_BUILD_DIR="/opt/docker/vector_db_gateway_git"
 CONTAINER="vector-db-gateway"
 IMAGE="vector-db-gateway:latest"
@@ -13,8 +16,17 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 GPU_MODE="${VECTOR_GATEWAY_GPU_MODE:-auto}"
 WATCHTOWER_ENABLE="${VECTOR_GATEWAY_WATCHTOWER_ENABLE:-false}"
 
-SSH_CMD="ssh -i $SSH_KEY $REMOTE"
-RSYNC_SSH="ssh -i $SSH_KEY"
+SSH_BASE=(ssh)
+SCP_BASE=(scp)
+if [[ -n "$SSH_KEY" ]]; then
+    SSH_BASE+=(-i "$SSH_KEY")
+    SCP_BASE+=(-i "$SSH_KEY")
+    RSYNC_SSH="ssh -i $SSH_KEY"
+else
+    RSYNC_SSH="ssh"
+fi
+SSH_CMD=("${SSH_BASE[@]}" "$REMOTE")
+SCP_CMD=("${SCP_BASE[@]}")
 
 hotpatch() {
     echo "==> Hotpatch vector-db-gateway"
@@ -30,19 +42,19 @@ hotpatch() {
             *.py|*.yaml|requirements.txt)
                 parent="$(dirname "$f")"
                 if [[ "$parent" != "." ]]; then
-                    $SSH_CMD "docker exec $CONTAINER mkdir -p /app/$parent"
+                    "${SSH_CMD[@]}" "docker exec $CONTAINER mkdir -p /app/$parent"
                 fi
-                scp -i "$SSH_KEY" "$SCRIPT_DIR/$f" "$REMOTE:/tmp/vg_patch_$(basename "$f")"
-                $SSH_CMD "docker cp /tmp/vg_patch_$(basename "$f") $CONTAINER:/app/$f && rm /tmp/vg_patch_$(basename "$f")"
+                "${SCP_CMD[@]}" "$SCRIPT_DIR/$f" "$REMOTE:/tmp/vg_patch_$(basename "$f")"
+                "${SSH_CMD[@]}" "docker cp /tmp/vg_patch_$(basename "$f") $CONTAINER:/app/$f && rm /tmp/vg_patch_$(basename "$f")"
                 ;;
         esac
     done
-    $SSH_CMD "docker restart $CONTAINER && sleep 3 && docker logs --tail 10 $CONTAINER 2>&1"
+    "${SSH_CMD[@]}" "docker restart $CONTAINER && sleep 3 && docker logs --tail 10 $CONTAINER 2>&1"
 }
 
 full_deploy() {
     echo "==> Full deploy vector-db-gateway"
-    $SSH_CMD "mkdir -p $REMOTE_BUILD_DIR $DATA_DIR/logs $DATA_DIR/cache $DATA_DIR/state"
+    "${SSH_CMD[@]}" "mkdir -p $REMOTE_BUILD_DIR $DATA_DIR/logs $DATA_DIR/cache $DATA_DIR/state"
     rsync -avz --delete \
         -e "$RSYNC_SSH" \
         --exclude '.git' \
@@ -54,14 +66,14 @@ full_deploy() {
         --exclude '*.pyc' \
         "$SCRIPT_DIR/" "$REMOTE:$REMOTE_BUILD_DIR/"
 
-    $SSH_CMD "cd $REMOTE_BUILD_DIR && docker build -t $IMAGE ."
-    $SSH_CMD "docker stop $CONTAINER 2>/dev/null || true"
-    $SSH_CMD "docker rm $CONTAINER 2>/dev/null || true"
+    "${SSH_CMD[@]}" "cd $REMOTE_BUILD_DIR && docker build -t $IMAGE ."
+    "${SSH_CMD[@]}" "docker stop $CONTAINER 2>/dev/null || true"
+    "${SSH_CMD[@]}" "docker rm $CONTAINER 2>/dev/null || true"
     gpu_args=""
     if [[ "$GPU_MODE" != "off" ]]; then
         gpu_args="--gpus all"
     fi
-    $SSH_CMD "
+    "${SSH_CMD[@]}" "
         docker run -d \
             --name $CONTAINER \
             --restart unless-stopped \
