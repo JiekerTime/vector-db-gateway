@@ -84,6 +84,8 @@ full_deploy() {
             -v $DATA_DIR/logs:/app/logs \
             -v $DATA_DIR/state:/app/state \
             -v $DATA_DIR/cache:/root/.cache/huggingface \
+            --memory=6g \
+            --memory-swap=8g \
             $IMAGE
     "
 }

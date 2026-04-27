@@ -12,12 +12,12 @@ embedding:
   batch_size: 64
   cpu_threads: 2
   cpu_interop_threads: 1
-  warmup_enabled: true
+  warmup_enabled: false
   warmup_models: ["default"]
   warmup_devices: ["cpu"]
   warmup_probe_texts: ["warmup"]
-  idle_unload_seconds: 900
-  idle_unload_devices: ["cuda"]
+  idle_unload_seconds: 600
+  idle_unload_devices: ["cpu", "cuda"]
 
 models:
   default:
@@ -110,15 +110,6 @@ collections:
     write_model: "legacy_small"
     aliases: []
     description: "Legacy Outline wiki collection for search-server compatibility"
-  knowledge_base_v2:
-    vector_size: 1024
-    distance: "Cosine"
-    owner: "group_portrait"
-    model: "default"
-    query_model: "default"
-    write_model: "default"
-    aliases: []
-    description: "Legacy dense-only knowledge collection"
   knowledge_base_v3:
     vector_size: 1024
     distance: "Cosine"
@@ -126,20 +117,16 @@ collections:
     vector_name: "dense"
     sparse_vector_name: "sparse"
     sparse_modifier: "idf"
+    payload_indexes:
+      expert_id: "keyword"
+      source_type: "keyword"
+      is_steering: "bool"
+      domain: "keyword"
     model: "default"
     query_model: "default"
     write_model: "default"
     aliases: []
     description: "Hybrid dense+sparse knowledge collection"
-  decision_memory_v1:
-    vector_size: 384
-    distance: "Cosine"
-    owner: "group_portrait"
-    model: "legacy_small"
-    query_model: "legacy_small"
-    write_model: "legacy_small"
-    aliases: []
-    description: "Legacy decision memory collection"
   decision_memory_v2:
     vector_size: 1024
     distance: "Cosine"
@@ -147,6 +134,10 @@ collections:
     vector_name: "dense"
     sparse_vector_name: "sparse"
     sparse_modifier: "idf"
+    payload_indexes:
+      meeting_id: "keyword"
+      primary_expert_id: "keyword"
+      domain: "keyword"
     model: "default"
     query_model: "default"
     write_model: "default"
@@ -162,8 +153,8 @@ logical_collections:
     query_model: "legacy_small"
     write_model: "legacy_small"
   knowledge:
-    read_targets: ["knowledge_base_v2"]
-    write_targets: ["knowledge_base_v2"]
+    read_targets: ["knowledge_base_v3"]
+    write_targets: ["knowledge_base_v3"]
     default_query_mode: "hybrid"
     alias_name: "knowledge"
     query_model: "default"

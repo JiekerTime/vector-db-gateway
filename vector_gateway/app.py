@@ -166,7 +166,8 @@ async def lifespan(_: FastAPI):
         selector=_selector,
         metrics=_metrics,
     )
-    _job_scheduler = JobScheduler(selector=_selector, metrics=_metrics)
+    job_worker_count = max(1, sum(max(1, queue.max_concurrent_jobs) for queue in _config.queues.values()))
+    _job_scheduler = JobScheduler(selector=_selector, metrics=_metrics, worker_count=job_worker_count)
     await _embed_batcher.start()
     await _job_scheduler.start()
 

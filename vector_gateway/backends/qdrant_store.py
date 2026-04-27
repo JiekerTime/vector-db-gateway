@@ -31,6 +31,7 @@ class QdrantStore:
     async def ensure_collections(self) -> None:
         for name, meta in self._collections.items():
             await asyncio.to_thread(self._ensure_collection_sync, name, meta)
+            await asyncio.to_thread(self._ensure_payload_indexes_sync, name, meta)
 
     async def ensure_alias(self, alias_name: str, collection: str) -> None:
         await asyncio.to_thread(self._ensure_alias_sync, alias_name, collection)
@@ -97,6 +98,7 @@ class QdrantStore:
         info.points_count = _safe_int(result.get("points_count"))
         info.indexed_vectors_count = _safe_int(result.get("indexed_vectors_count"))
         info.status = str(result.get("status") or "unknown")
+        await asyncio.to_thread(self._ensure_payload_indexes_sync, collection, meta)
         return created, info
 
     async def search(
@@ -324,6 +326,53 @@ class QdrantStore:
             vectors_config=vectors_config,
             sparse_vectors_config=sparse_vectors_config,
         )
+        self._ensure_payload_indexes_sync(collection, meta)
+
+    def _ensure_payload_indexes_sync(self, collection: str, meta: CollectionConfig) -> None:
+        if not meta.payload_indexes:
+            return
+        client = self._get_client()
+        existing = self._payload_schema(collection)
+        for field_name, schema_name in meta.payload_indexes.items():
+            if field_name in existing:
+                continue
+            try:
+                client.create_payload_index(
+                    collection_name=collection,
+                    field_name=field_name,
+                    field_schema=self._payload_schema_value(str(schema_name)),
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to create payload index collection=%s field=%s schema=%s",
+                    collection,
+                    field_name,
+                    schema_name,
+                )
+            else:
+                logger.info(
+                    "Created payload index collection=%s field=%s schema=%s",
+                    collection,
+                    field_name,
+                    schema_name,
+                )
+
+    def _payload_schema(self, collection: str) -> dict[str, Any]:
+        try:
+            details = self._get_collection(collection)
+        except Exception:
+            return {}
+        result = self._collection_result(details)
+        schema = result.get("payload_schema") or {}
+        return dict(schema) if isinstance(schema, dict) else {}
+
+    def _payload_schema_value(self, schema_name: str) -> Any:
+        models = self._models()
+        normalized = schema_name.strip().upper()
+        enum = getattr(models, "PayloadSchemaType", None)
+        if enum is not None and hasattr(enum, normalized):
+            return getattr(enum, normalized)
+        return schema_name.strip().lower()
 
     def _recreate_collection(self, collection: str, meta: CollectionConfig) -> None:
         client = self._get_client()

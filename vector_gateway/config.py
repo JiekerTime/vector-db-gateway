@@ -66,6 +66,7 @@ class CollectionConfig(BaseModel):
     vector_name: str | None = None
     sparse_vector_name: str | None = None
     sparse_modifier: str | None = None
+    payload_indexes: dict[str, str] = Field(default_factory=dict)
     model: str | None = None
     query_model: str | None = None
     write_model: str | None = None

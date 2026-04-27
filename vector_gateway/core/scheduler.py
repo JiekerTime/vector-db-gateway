@@ -101,30 +101,34 @@ class ScheduledJob:
 
 
 class JobScheduler:
-    """Single-worker scheduler for search, count, and upsert operations."""
+    """Fair scheduler for search, count, scroll, and upsert operations."""
 
-    def __init__(self, selector: FairSelector, metrics: MetricsStore):
+    def __init__(self, selector: FairSelector, metrics: MetricsStore, worker_count: int = 1):
         self._selector = selector
         self._metrics = metrics
+        self._worker_count = max(1, int(worker_count))
         self._queues: dict[str, list[ScheduledJob]] = {
             "realtime": [],
             "interactive": [],
             "batch": [],
         }
         self._condition = asyncio.Condition()
-        self._worker: asyncio.Task | None = None
+        self._workers: list[asyncio.Task] = []
         self._closed = False
 
     async def start(self) -> None:
-        if self._worker is None:
-            self._worker = asyncio.create_task(self._run(), name="vector-job-scheduler")
+        if not self._workers:
+            self._workers = [
+                asyncio.create_task(self._run(), name=f"vector-job-scheduler-{index + 1}")
+                for index in range(self._worker_count)
+            ]
 
     async def stop(self) -> None:
         async with self._condition:
             self._closed = True
             self._condition.notify_all()
-        if self._worker is not None:
-            await self._worker
+        for worker in self._workers:
+            await worker
 
     async def submit(
         self,
@@ -172,7 +176,7 @@ class JobScheduler:
                 result = await chosen.factory()
             except Exception as exc:  # pragma: no cover - exercised by integration
                 self._metrics.observe_request(
-                    chosen.endpoint,
+                    f"scheduler.{chosen.endpoint}",
                     latency_ms=int((time.monotonic() - request_start) * 1000),
                     queue_wait_ms=queue_wait_ms,
                     failed=True,
@@ -182,7 +186,7 @@ class JobScheduler:
                 logger.exception("Scheduled job failed: %s", chosen.request_id)
             else:
                 self._metrics.observe_request(
-                    chosen.endpoint,
+                    f"scheduler.{chosen.endpoint}",
                     latency_ms=int((time.monotonic() - request_start) * 1000),
                     queue_wait_ms=queue_wait_ms,
                 )

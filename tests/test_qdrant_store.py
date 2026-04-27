@@ -91,6 +91,11 @@ class _FakeModels:
     DeleteAliasOperation = _FakeDeleteAliasOperation
     CreateAlias = _FakeCreateAlias
     CreateAliasOperation = _FakeCreateAliasOperation
+    PayloadSchemaType = type(
+        "PayloadSchemaType",
+        (),
+        {"KEYWORD": "keyword", "BOOL": "bool", "INTEGER": "integer", "FLOAT": "float", "TEXT": "text"},
+    )
 
 
 class _FakeClient:
@@ -103,6 +108,7 @@ class _FakeClient:
         self.upsert_calls: list[dict[str, object]] = []
         self.set_payload_calls: list[dict[str, object]] = []
         self.retrieve_calls: list[dict[str, object]] = []
+        self.payload_index_calls: list[dict[str, object]] = []
 
     def get_collections(self):
         collection_items = [type("CollectionRef", (), {"name": name})() for name in self.collections]
@@ -121,6 +127,7 @@ class _FakeClient:
                 "points_count": stored.get("points_count", 0),
                 "indexed_vectors_count": stored.get("indexed_vectors_count", 0),
                 "status": stored.get("status", "green"),
+                "payload_schema": stored.get("payload_schema", {}),
             }
         }
 
@@ -149,6 +156,19 @@ class _FakeClient:
             "points_count": 0,
             "indexed_vectors_count": 0,
             "status": "green",
+            "payload_schema": {},
+        }
+
+    def create_payload_index(self, *, collection_name: str, field_name: str, field_schema):
+        self.payload_index_calls.append(
+            {
+                "collection_name": collection_name,
+                "field_name": field_name,
+                "field_schema": field_schema,
+            }
+        )
+        self.collections.setdefault(collection_name, {}).setdefault("payload_schema", {})[field_name] = {
+            "data_type": field_schema,
         }
 
     def delete_collection(self, *, collection_name: str):
@@ -297,6 +317,41 @@ class QdrantStoreBootstrapTest(unittest.TestCase):
         created = client.collections["knowledge_base_v3"]
         self.assertEqual(created["vectors"]["dense"]["size"], 1024)
         self.assertEqual(created["sparse_vectors"]["sparse"]["modifier"], "idf")
+
+    def test_bootstrap_creates_configured_payload_indexes(self) -> None:
+        client = _FakeClient()
+        store = _FakeQdrantStore(
+            client,
+            {
+                "knowledge_base_v3": CollectionConfig(
+                    vector_size=1024,
+                    distance="Cosine",
+                    owner="default",
+                    vector_name="dense",
+                    sparse_vector_name="sparse",
+                    sparse_modifier="idf",
+                    payload_indexes={"expert_id": "keyword", "is_steering": "bool"},
+                )
+            },
+        )
+
+        asyncio.run(store.ensure_collections())
+
+        self.assertEqual(
+            client.payload_index_calls,
+            [
+                {
+                    "collection_name": "knowledge_base_v3",
+                    "field_name": "expert_id",
+                    "field_schema": "keyword",
+                },
+                {
+                    "collection_name": "knowledge_base_v3",
+                    "field_name": "is_steering",
+                    "field_schema": "bool",
+                },
+            ],
+        )
 
     def test_existing_collection_is_not_recreated(self) -> None:
         client = _FakeClient()

@@ -178,9 +178,9 @@ Queue configuration can also steer the default embedding device:
 
 For notebook-style hosts, a more reasonable operating profile is:
 
-- warm only the CPU profile at startup, so the GPU is not pinned resident before any online traffic arrives
+- skip startup warmup, so the service does not pin a large embedding profile resident before any traffic arrives
 - keep `batch` on `cpu`, so long-running ingest and backfill do not occupy the GPU by default
-- enable idle GPU unload, so a temporary accelerated burst does not leave the GPU model resident forever
+- enable idle unload for both `cpu` and `cuda`, so a temporary burst or startup probe does not leave a large model resident forever
 
 Request payloads can still override this with `device`.
 
