@@ -594,7 +594,7 @@ class QdrantStore:
                     built.append(
                         models.FieldCondition(
                             key=key,
-                            range=models.Range(**item["range"]),
+                            range=self._build_range(models, item["range"]),
                         )
                     )
                     continue
@@ -617,6 +617,11 @@ class QdrantStore:
                 continue
             raise ValueError(f"Unsupported filter condition: {item!r}")
         return built
+
+    def _build_range(self, models: Any, range_spec: dict[str, Any]):
+        if any(isinstance(value, str) for value in (range_spec or {}).values()):
+            return models.DatetimeRange(**range_spec)
+        return models.Range(**range_spec)
 
     def _collection_meta(self, collection: str) -> CollectionConfig:
         meta = self._collections.get(collection)

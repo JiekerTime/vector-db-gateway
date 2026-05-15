@@ -56,6 +56,40 @@ class _FakePointStruct:
         self.payload = payload
 
 
+class _FakeRange:
+    def __init__(self, **kwargs):
+        self.values = kwargs
+
+
+class _FakeDatetimeRange:
+    def __init__(self, **kwargs):
+        self.values = kwargs
+
+
+class _FakeMatchValue:
+    def __init__(self, *, value):
+        self.value = value
+
+
+class _FakeMatchAny:
+    def __init__(self, *, any):
+        self.any = any
+
+
+class _FakeFieldCondition:
+    def __init__(self, *, key, match=None, range=None):
+        self.key = key
+        self.match = match
+        self.range = range
+
+
+class _FakeFilter:
+    def __init__(self, *, must=None, should=None, must_not=None):
+        self.must = must
+        self.should = should
+        self.must_not = must_not
+
+
 class _FakeDeleteAlias:
     def __init__(self, *, alias_name):
         self.alias_name = alias_name
@@ -87,6 +121,12 @@ class _FakeModels:
     Prefetch = _FakePrefetch
     FusionQuery = _FakeFusionQuery
     PointStruct = _FakePointStruct
+    Range = _FakeRange
+    DatetimeRange = _FakeDatetimeRange
+    MatchValue = _FakeMatchValue
+    MatchAny = _FakeMatchAny
+    FieldCondition = _FakeFieldCondition
+    Filter = _FakeFilter
     DeleteAlias = _FakeDeleteAlias
     DeleteAliasOperation = _FakeDeleteAliasOperation
     CreateAlias = _FakeCreateAlias
@@ -559,6 +599,23 @@ class QdrantStoreBootstrapTest(unittest.TestCase):
                     with_vectors=False,
                 )
             )
+
+    def test_build_filter_uses_datetime_range_for_iso_strings(self) -> None:
+        client = _FakeClient()
+        store = _FakeQdrantStore(client, {})
+
+        q_filter = store._build_filter(
+            {
+                "must": [
+                    {"key": "expert_id", "match": "karpathy"},
+                    {"key": "ingest_at", "range": {"gte": "2026-05-14T09:40:58Z"}},
+                    {"key": "score", "range": {"gte": 0.5}},
+                ]
+            }
+        )
+
+        self.assertIsInstance(q_filter.must[1].range, _FakeDatetimeRange)
+        self.assertIsInstance(q_filter.must[2].range, _FakeRange)
 
     def test_retrieve_and_set_payload_are_supported(self) -> None:
         client = _FakeClient()
