@@ -12,12 +12,12 @@ embedding:
   batch_size: 64
   cpu_threads: 2
   cpu_interop_threads: 1
-  warmup_enabled: false
+  warmup_enabled: true
   warmup_models: ["default"]
-  warmup_devices: ["cpu"]
+  warmup_devices: ["cuda"]
   warmup_probe_texts: ["warmup"]
   idle_unload_seconds: 600
-  idle_unload_devices: ["cpu", "cuda"]
+  idle_unload_devices: ["cpu"]
 
 models:
   default:
