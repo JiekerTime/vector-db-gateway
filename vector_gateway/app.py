@@ -199,6 +199,37 @@ def _check_api_key(x_api_key: str = Header(default="")) -> None:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
+def _qdrant_failure_status(exc: Exception) -> int:
+    raw_status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    try:
+        status = int(raw_status)
+    except (TypeError, ValueError):
+        status = 0
+    if status == 404:
+        return 404
+
+    name = exc.__class__.__name__.lower()
+    message = str(exc).lower()
+    if "404" in message and "not found" in message:
+        return 404
+    if "timeout" in name or "timeout" in message or "timed out" in message:
+        return 504
+    return 502
+
+
+def _raise_qdrant_failure(endpoint: str, exc: Exception, started: float, queue_wait_ms: int = 0) -> None:
+    latency_ms = int((time.monotonic() - started) * 1000)
+    _metrics.observe_request(
+        endpoint,
+        latency_ms=latency_ms,
+        queue_wait_ms=queue_wait_ms,
+        failed=True,
+    )
+    status_code = _qdrant_failure_status(exc)
+    logger.warning("Qdrant %s failed with HTTP %s: %s", endpoint, status_code, exc)
+    raise HTTPException(status_code=status_code, detail=f"Qdrant {endpoint} failed: {exc}") from exc
+
+
 def _require_do_mig() -> DoMigRunner:
     if _do_mig_runner is None:
         raise HTTPException(status_code=503, detail="do-mig is not configured")
@@ -506,6 +537,10 @@ async def count(request: CountRequest, x_api_key: str = Header(default="")):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _raise_qdrant_failure("count", exc, started)
     latency_ms = int((time.monotonic() - started) * 1000)
     _metrics.observe_request("count", latency_ms=latency_ms, queue_wait_ms=queue_wait_ms)
     return CountResponse(
@@ -544,6 +579,10 @@ async def scroll(request: ScrollRequest, x_api_key: str = Header(default="")):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _raise_qdrant_failure("scroll", exc, started)
     latency_ms = int((time.monotonic() - started) * 1000)
     _metrics.observe_request("scroll", latency_ms=latency_ms, queue_wait_ms=queue_wait_ms)
     return ScrollResponse(

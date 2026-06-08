@@ -9,7 +9,9 @@ from vector_gateway.config import CollectionConfig, EmbeddingModelConfig, Gatewa
 from vector_gateway.core.router import Router
 from vector_gateway.core.logical_registry import LogicalCollectionRegistry
 from vector_gateway.core.state_store import MigrationStateStore
-from vector_gateway.models.api import AgentActionRequest
+from fastapi import HTTPException
+
+from vector_gateway.models.api import AgentActionRequest, CountRequest, ScrollRequest
 
 
 def _gateway_config(tmpdir: str) -> GatewayConfig:
@@ -55,6 +57,26 @@ class _FakeQdrant:
         return 7
 
 
+class _FakeMissingCollection(Exception):
+    status_code = 404
+
+
+class _MissingQdrant:
+    async def count(self, *, collection: str, filter_spec):
+        raise _FakeMissingCollection("Collection not found: retired_collection")
+
+    async def scroll(self, *, collection: str, filter_spec, limit: int, with_payload: bool, with_vectors: bool):
+        raise _FakeMissingCollection("Collection not found: retired_collection")
+
+
+class _TimeoutQdrant:
+    async def count(self, *, collection: str, filter_spec):
+        raise TimeoutError("Qdrant read timed out")
+
+    async def scroll(self, *, collection: str, filter_spec, limit: int, with_payload: bool, with_vectors: bool):
+        raise TimeoutError("Qdrant read timed out")
+
+
 class _FakeScheduler:
     async def submit(self, *, factory, **_kwargs):
         return await factory(), 0
@@ -63,6 +85,18 @@ class _FakeScheduler:
 class _FakeMetrics:
     def observe_request(self, *_args, **_kwargs):
         return None
+
+
+def _install_app_state(config: GatewayConfig, qdrant) -> None:
+    state_store = MigrationStateStore(config.state_dir)
+    registry = LogicalCollectionRegistry(config, state_store)
+    registry.bootstrap()
+    app_module._config = config
+    app_module._router = Router.from_config(config)
+    app_module._metrics = _FakeMetrics()
+    app_module._job_scheduler = _FakeScheduler()
+    app_module._logical_registry = registry
+    app_module._qdrant = qdrant
 
 
 class GatewayContractTest(unittest.TestCase):
@@ -103,15 +137,7 @@ class GatewayContractTest(unittest.TestCase):
     def test_agent_action_supports_count(self) -> None:
         with TemporaryDirectory() as tmpdir:
             config = _gateway_config(tmpdir)
-            state_store = MigrationStateStore(tmpdir)
-            registry = LogicalCollectionRegistry(config, state_store)
-            registry.bootstrap()
-            app_module._config = config
-            app_module._router = Router.from_config(config)
-            app_module._metrics = _FakeMetrics()
-            app_module._job_scheduler = _FakeScheduler()
-            app_module._logical_registry = registry
-            app_module._qdrant = _FakeQdrant()
+            _install_app_state(config, _FakeQdrant())
 
             response = asyncio.run(
                 app_module.agent_action(
@@ -129,6 +155,24 @@ class GatewayContractTest(unittest.TestCase):
 
         self.assertEqual(response.count, 7)
         self.assertEqual(response.collection, "knowledge")
+
+    def test_count_maps_missing_qdrant_collection_to_404(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            _install_app_state(_gateway_config(tmpdir), _MissingQdrant())
+
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(app_module.count(CountRequest(collection="knowledge"), x_api_key="test"))
+
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_scroll_maps_qdrant_timeout_to_504(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            _install_app_state(_gateway_config(tmpdir), _TimeoutQdrant())
+
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(app_module.scroll(ScrollRequest(collection="knowledge"), x_api_key="test"))
+
+        self.assertEqual(ctx.exception.status_code, 504)
 
 
 if __name__ == "__main__":
